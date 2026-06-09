@@ -1,0 +1,48 @@
+# TradeX-Pro v2.0 — Python Dependencies
+# Quraşdırma: pip install -r requirements.txt
+
+# ── AI & Language Model ─────────────────────────
+openai>=1.30.0
+
+# ── Telegram ────────────────────────────────────
+python-telegram-bot>=20.7
+
+# ── Exchange & Market Data ───────────────────────
+ccxt>=4.3.0
+python-binance>=1.0.19
+
+# ── Technical Analysis ──────────────────────────
+pandas-ta>=0.3.14b
+# TA-Lib (əgər lazımdırsa, ayrıca quraşdırın)
+# pip install TA-Lib   (və ya conda install -c conda-forge ta-lib)
+
+# ── Data Science ────────────────────────────────
+pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# ── Scheduling ──────────────────────────────────
+APScheduler>=3.10.4
+
+# ── Database ────────────────────────────────────
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.9    # PostgreSQL driver
+# sqlite3 Python standart kitabxanasına daxildir
+
+# ── Environment & Security ──────────────────────
+python-dotenv>=1.0.0
+cryptography>=41.0.0
+
+# ── HTTP & News ─────────────────────────────────
+requests>=2.31.0
+newsapi-python>=0.2.7
+
+# ── Logging ─────────────────────────────────────
+loguru>=0.7.0
+
+# ── US Stocks (opsional) ─────────────────────────
+# alpaca-trade-api>=3.0.0
+
+# ── Backtesting (opsional) ───────────────────────
+# vectorbt>=0.26.0
+# backtesting>=0.3.3

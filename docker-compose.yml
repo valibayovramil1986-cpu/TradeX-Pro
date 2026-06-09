@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL Verilənlər Bazası ─────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tradex_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: tradex_pro
+      POSTGRES_USER: tradex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"          # DataGrip qoşulması üçün
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradex -d tradex_pro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── TradeX-Pro Botu ──────────────────────────
+  tradex_bot:
+    build: .
+    container_name: tradex_bot
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      # Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # PostgreSQL
+      - DATABASE_URL=postgresql://tradex:${POSTGRES_PASSWORD}@postgres:5432/tradex_pro
+      # Ticarət
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - INITIAL_CAPITAL=${INITIAL_CAPITAL:-1000}
+      - MAX_RISK_PER_TRADE=${MAX_RISK_PER_TRADE:-0.02}
+      - MAX_OPEN_POSITIONS=${MAX_OPEN_POSITIONS:-3}
+      - SIGNAL_THRESHOLD=${SIGNAL_THRESHOLD:-60}
+      # Binance (opsional)
+      - BINANCE_API_KEY=${BINANCE_API_KEY:-}
+      - BINANCE_SECRET=${BINANCE_SECRET:-}
+      # News (opsional)
+      - NEWSAPI_KEY=${NEWSAPI_KEY:-}
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  postgres_data:
+    driver: local

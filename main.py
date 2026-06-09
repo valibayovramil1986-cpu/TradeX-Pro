@@ -1,0 +1,546 @@
+"""
+TradeX-Pro v2.0 — Əsas Giriş Nöqtəsi
+OpenAI GPT-4o + Self-Reflection + Memory + Telegram
+"""
+
+import asyncio
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from loguru import logger
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+# Path düzəltməsi
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config.settings import Settings
+from core.signal_engine import SignalEngine
+from core.risk_manager import RiskManager, RiskParams
+from core.order_executor import OrderExecutor
+from core.market_scanner import MarketScanner
+from ai.gpt4_client import GPT4Client
+from ai.signal_contextualizer import SignalContextualizer
+from ai.reflection_engine import ReflectionEngine
+from memory.trade_journal import TradeJournal
+from memory.weight_manager import WeightManager
+from memory.pattern_memory import PatternMemory
+from memory.strategy_log import StrategyLog
+from tgbot.bot import TradexBot
+from phases.phase_manager import PhaseManager
+
+
+class TradeXPro:
+    """
+    TradeX-Pro-nun əsas orkestratoru.
+    Bütün komponentləri birləşdirir, 3 saatlıq skanı idarə edir.
+    """
+
+    def __init__(self):
+        self._trading_paused = False
+        self._initialized = False
+
+        # Qeydiyyat konfiqurasyonu
+        logger.remove()
+        logger.add(sys.stdout, level=Settings.LOG_LEVEL,
+                   format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | {message}")
+        logger.add(Settings.LOG_FILE, rotation="10 MB", retention="30 days",
+                   level="DEBUG", encoding="utf-8")
+
+    async def initialize(self):
+        """Bütün komponentləri işə sal"""
+        logger.info("🤖 TradeX-Pro v2.0 başladılır...")
+
+        # Konfiqurasiya yoxlaması
+        errors = Settings.validate()
+        if errors:
+            for e in errors:
+                logger.error(e)
+            logger.warning("Bəzi API açarları tapılmadı — Demo rejimdə işləyir")
+
+        # ── Yaddaş Sistemi ──
+        self.trade_journal = TradeJournal()
+        self.weight_manager = WeightManager()
+        self.pattern_memory = PatternMemory()
+        self.strategy_log = StrategyLog()
+
+        # ── Risk & Executor ──
+        phase_mgr_temp = PhaseManager()
+        targets = phase_mgr_temp.current_targets
+        risk_params = RiskParams(
+            max_risk_per_trade_pct=Settings.MAX_RISK_PER_TRADE,
+            max_open_positions=Settings.MAX_OPEN_POSITIONS,
+            daily_drawdown_limit_pct=Settings.DAILY_DRAWDOWN_LIMIT,
+            weekly_drawdown_limit_pct=Settings.WEEKLY_DRAWDOWN_LIMIT,
+        )
+        self.risk_manager = RiskManager(risk_params)
+        self.executor = OrderExecutor(
+            risk_manager=self.risk_manager,
+            mode=Settings.TRADING_MODE,
+            initial_balance=Settings.INITIAL_CAPITAL,
+        )
+
+        # ── AI Sistemi ──
+        if Settings.OPENAI_API_KEY:
+            self.gpt_client = GPT4Client(Settings.OPENAI_API_KEY)
+            self.contextualizer = SignalContextualizer(self.gpt_client)
+            self.reflection_engine = ReflectionEngine(
+                self.gpt_client, self.trade_journal, self.strategy_log
+            )
+        else:
+            self.gpt_client = None
+            self.contextualizer = None
+            self.reflection_engine = None
+            logger.warning("OpenAI API açarı yoxdur — AI funksiyaları deaktivdir")
+
+        # ── Signal & Scanner ──
+        weights = self.weight_manager.get_signal_weights()
+        self.signal_engine = SignalEngine(weights=weights)
+
+        # Exchange client (optional — None = demo data)
+        exchange_client = self._init_exchange()
+
+        self.scanner = MarketScanner(
+            signal_engine=self.signal_engine,
+            risk_manager=self.risk_manager,
+            executor=self.executor,
+            exchange_client=exchange_client,
+        )
+
+        # ── Faza Meneceri ──
+        self.phase_manager = PhaseManager()
+
+        # ── Telegram Botu ──
+        self.telegram = None
+        if Settings.TELEGRAM_BOT_TOKEN and Settings.TELEGRAM_CHAT_ID:
+            self.telegram = TradexBot(
+                token=Settings.TELEGRAM_BOT_TOKEN,
+                chat_id=Settings.TELEGRAM_CHAT_ID,
+                on_pause=self._pause_trading,
+                on_resume=self._resume_trading,
+                on_close_all=self._emergency_close_all,
+                on_set_risk=self._set_risk_level,
+                on_promote=self._promote_phase,
+                get_status=self._get_status_message,
+                get_signals=self._get_signals_message,
+                get_performance=self._get_performance_message,
+                get_reflection=self._get_reflection_message,
+                get_memory=self._get_memory_message,
+                get_lessons=self._get_lessons_message,
+                get_weights=self._get_weights_message,
+                get_phase=self._get_phase_message,
+                get_patterns=self._get_patterns_message,
+            )
+            await self.telegram.initialize()
+
+        # ── Zamanlayıcı ──
+        self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self._setup_scheduler()
+
+        self._initialized = True
+        logger.info(f"✅ TradeX-Pro hazırdır | {Settings.display()}")
+
+    def _init_exchange(self):
+        """CCXT exchange client-i işə sal"""
+        if not Settings.BINANCE_API_KEY:
+            logger.info("Binance API açarı yoxdur — demo data istifadə edilir")
+            return None
+        try:
+            import ccxt
+            exchange = ccxt.binance({
+                "apiKey": Settings.BINANCE_API_KEY,
+                "secret": Settings.BINANCE_SECRET,
+                "sandbox": Settings.TRADING_MODE == "paper",
+                "enableRateLimit": True,
+            })
+            logger.info("Binance qoşuldu ✅")
+            return exchange
+        except Exception as e:
+            logger.error(f"Exchange qoşulması uğursuz: {e}")
+            return None
+
+    def _setup_scheduler(self):
+        """3 saatlıq skan zamanlayıcısı"""
+        # Hər 3 saatdan bir skan
+        self.scheduler.add_job(
+            self._scheduled_scan,
+            CronTrigger(hour="0,3,6,9,12,15,18,21", minute=0, timezone="UTC"),
+            id="market_scan",
+            name="3-Saatlıq Bazar Skanı",
+        )
+
+        # Gündəlik risk sıfırlanması (gecəyarısı UTC)
+        self.scheduler.add_job(
+            self.risk_manager.reset_daily_stats,
+            CronTrigger(hour=0, minute=0, timezone="UTC"),
+            id="daily_reset",
+        )
+
+        # Həftəlik macro refleksiya (bazar ertəsi 08:00 UTC)
+        self.scheduler.add_job(
+            self._weekly_reflection,
+            CronTrigger(day_of_week="mon", hour=8, minute=0, timezone="UTC"),
+            id="weekly_reflection",
+        )
+
+        # Həftəlik risk sıfırlanması
+        self.scheduler.add_job(
+            self.risk_manager.reset_weekly_stats,
+            CronTrigger(day_of_week="mon", hour=0, minute=0, timezone="UTC"),
+            id="weekly_reset",
+        )
+
+        logger.info("Zamanlayıcı konfiqasiya edildi ✅")
+
+    # ──────────────────────────────────────────────
+    # Əsas Skan Prosesi
+    # ──────────────────────────────────────────────
+    async def _scheduled_scan(self):
+        """3 saatdan bir çağırılan əsas skan"""
+        if self._trading_paused:
+            logger.info("Ticarət dayandırılıb — skan keçildi")
+            return
+
+        logger.info(f"⏰ Planlaşdırılmış skan: {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+
+        # Texniki skan
+        signals = await self.scanner.run_scan(self.phase_manager.current_phase)
+
+        # Siqnalları GPT-4 ilə zənginləşdir
+        actionable = []
+        if self.contextualizer:
+            for signal in signals:
+                if signal.proceed and signal.technical_score >= 55:
+                    enriched = await self.contextualizer.enrich_signal(signal, self.signal_engine)
+                    actionable.append(enriched)
+        else:
+            actionable = [s for s in signals if s.proceed]
+
+        # Ticarətləri icra et
+        opened_trades = []
+        for signal in actionable:
+            if not signal.proceed or signal.direction == "NO_TRADE":
+                continue
+
+            risk_check = self.risk_manager.check_trade_allowed(
+                self.executor.balance, self.executor.initial_balance
+            )
+            if not risk_check.allowed:
+                if risk_check.halt_trading and self.telegram:
+                    await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
+                break
+
+            pos_size = self.risk_manager.calculate_position_size(
+                self.executor.balance, signal.entry_zone_high, signal.stop_loss
+            )
+
+            position = self.executor.open_position(
+                signal, pos_size,
+                confidence=signal.final_score / 10,
+                phase=self.phase_manager.current_phase,
+            )
+
+            if position and self.telegram:
+                await self.telegram.send_trade_opened(vars(position), Settings.TRADING_MODE.upper())
+                opened_trades.append(position)
+
+        # SL/TP yoxla
+        prices = self.scanner.get_current_prices()
+        closed = self.executor.check_sl_tp(prices)
+        for trade in closed:
+            # Ticarəti gündəliyə əlavə et
+            self.trade_journal.save_trade(vars(trade))
+            self.pattern_memory.record_trade(trade.indicators_triggered, trade.pnl_usd)
+
+            # Refleksiya
+            reflection_summary = ""
+            if self.reflection_engine:
+                reflection = await self.reflection_engine.reflect_on_trade(trade.trade_id)
+                if reflection:
+                    reflection_summary = reflection.get("summary", "")
+
+            if self.telegram:
+                await self.telegram.send_trade_closed(vars(trade), reflection_summary)
+
+        # Çəki analizini yoxla (hər 20 ticarətdən sonra)
+        all_trades = self.trade_journal.get_weekly_stats(days=30)
+        if all_trades.get("total_trades", 0) % 20 == 0 and all_trades.get("total_trades", 0) > 0:
+            recent = []  # Ətraflı ticarət obyektləri lazımdır
+            changes = self.weight_manager.analyze_and_adjust(recent)
+            if changes:
+                new_weights = self.weight_manager.get_signal_weights()
+                self.signal_engine.update_weights(new_weights)
+
+        # Hesabat göndər
+        report = await self._build_scan_report(signals, actionable, opened_trades)
+        if self.telegram:
+            await self.telegram.send_scan_report(report)
+
+    async def _weekly_reflection(self):
+        """Həftəlik macro refleksiya"""
+        if self.reflection_engine:
+            reflection = await self.reflection_engine.weekly_macro_reflection()
+            if reflection and self.telegram:
+                summary = reflection.get("telegram_summary", "Refleksiya məlumatı")
+                await self.telegram.send_weekly_reflection(summary)
+
+    # ──────────────────────────────────────────────
+    # Telegram Callback Funksiyaları
+    # ──────────────────────────────────────────────
+    async def _pause_trading(self):
+        self._trading_paused = True
+        logger.info("⏸ Ticarət dayandırıldı")
+
+    async def _resume_trading(self):
+        self._trading_paused = False
+        self.risk_manager.resume_trading()
+        logger.info("▶️ Ticarət davam etdirildi")
+
+    async def _emergency_close_all(self):
+        prices = self.scanner.get_current_prices()
+        closed = self.executor.close_all_positions(prices, "emergency_close_all")
+        for trade in closed:
+            self.trade_journal.save_trade(vars(trade))
+        logger.warning(f"🚨 Bütün mövqelər bağlandı: {len(closed)}")
+
+    async def _set_risk_level(self, level: str):
+        risk_map = {"low": 0.005, "medium": 0.015, "high": 0.025}
+        self.risk_manager.params.max_risk_per_trade_pct = risk_map.get(level, 0.015)
+        logger.info(f"Risk səviyyəsi: {level} ({risk_map.get(level)*100:.1f}%)")
+
+    async def _promote_phase(self) -> str:
+        """Faza keçid əmri"""
+        current = self.phase_manager.current_phase
+        targets = self.phase_manager.current_targets
+
+        # Hazırlıq balını hesabla
+        stats = self.trade_journal.get_phase_stats(current)
+        if self.reflection_engine:
+            evaluation = await self.reflection_engine.evaluate_phase(current, targets)
+            readiness = evaluation.get("readiness_score", 0)
+            if readiness < targets["readiness_threshold"]:
+                return (f"⚠️ Hazırlıq balı: {readiness}/100 "
+                        f"(minimum: {targets['readiness_threshold']})\n"
+                        f"Hədəflər hələ əldə edilməyib. Davam edin.")
+
+        result = self.phase_manager.promote_to_next_phase("user_command")
+        if result["success"]:
+            # Kapitalı yenilə
+            new_capital = result.get("capital")
+            if new_capital:
+                self.executor.balance = new_capital
+                self.executor.initial_balance = new_capital
+            return (f"🎓 *{result['message']}*\n"
+                    f"Yeni kapital: ${new_capital:,.0f}\n"
+                    f"Mode: {result['mode'].upper()}")
+        return result["message"]
+
+    # ──────────────────────────────────────────────
+    # Telegram Məlumat Funksiyaları
+    # ──────────────────────────────────────────────
+    async def _get_status_message(self) -> str:
+        risk = self.risk_manager.status
+        phase = self.phase_manager.current_phase
+        pnl = self.executor.total_pnl
+        pnl_pct = self.executor.total_pnl_pct
+        mode = Settings.TRADING_MODE.upper()
+
+        lines = [
+            f"📊 *TradeX-Pro Status* [{mode}]",
+            f"━━━━━━━━━━━━━━━━━━━━━━",
+            f"• Balans: ${self.executor.balance:,.2f}",
+            f"• Ümumi P&L: {'+' if pnl >= 0 else ''}{pnl:.2f}$ ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)",
+            f"• Açıq Mövqe: {risk['open_positions']}",
+            f"• Faza: {phase}",
+            f"• Ticarət: {'⏸ Dayandırılıb' if self._trading_paused else '▶️ Aktiv'}",
+            f"• Ardıcıl İtki: {risk['consecutive_losses']}",
+            f"• Bu gün P&L: ${risk['today_pnl']:+.2f}",
+        ]
+        if self.gpt_client:
+            usage = self.gpt_client.usage_stats
+            lines.append(f"• GPT-4 Çağırış: {usage['total_calls']} (~${usage['estimated_cost_usd']:.3f})")
+        return "\n".join(lines)
+
+    async def _get_signals_message(self) -> str:
+        if not self.scanner.last_scan_results:
+            return "Hələ skan aparılmayıb. Gözləyin..."
+        signals = [s for s in self.scanner.last_scan_results if s.direction != "NO_TRADE"]
+        if not signals:
+            return "Son skanda ticarət siqnalı tapılmadı."
+        lines = [f"📡 *Son Skan Siqnalları* ({len(signals)} ədəd):", "━━━━━━━━━━━━━━━━━━━━━━"]
+        for s in sorted(signals, key=lambda x: x.final_score, reverse=True)[:5]:
+            emoji = "🟢" if s.direction == "LONG" else "🔴"
+            lines.append(f"{emoji} {s.symbol} | {s.direction} | Bal: {s.final_score:.0f}/100 | {s.signal_strength}")
+        return "\n".join(lines)
+
+    async def _get_performance_message(self) -> str:
+        stats = self.trade_journal.get_weekly_stats(days=7)
+        if stats.get("total_trades", 0) == 0:
+            return "Bu həftə ticarət yoxdur."
+        return (
+            f"📈 *Həftəlik Performans*\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Ticarət: {stats['total_trades']} ({stats['win_count']}W/{stats['loss_count']}L)\n"
+            f"• Win Rate: {stats['win_rate_pct']:.1f}%\n"
+            f"• P&L: ${stats['total_pnl_usd']:+.2f}\n"
+            f"• Profit Factor: {stats['profit_factor']:.2f}\n"
+            f"• Sharpe: {stats['sharpe_ratio']:.2f}\n"
+            f"• Max DD: {stats['max_drawdown_pct']:.1f}%"
+        )
+
+    async def _get_reflection_message(self) -> str:
+        recent = self.strategy_log.get_recent_changes(days=7)
+        if not recent:
+            return "Son 7 gündə strategiya dəyişikliyi yoxdur."
+        lines = ["🧠 *Son Strategiya Dəyişiklikləri:*", "━━━━━━━━━━━━━━━━━━━━━━"]
+        for c in recent[:5]:
+            lines.append(f"• [{c['type']}] {c['description']} ({c['date'][:10]})")
+        return "\n".join(lines)
+
+    async def _get_memory_message(self) -> str:
+        stats = self.trade_journal.get_weekly_stats(days=30)
+        hour_perf = self.trade_journal.get_performance_by_hour()
+        best_hours = sorted(hour_perf.items(), key=lambda x: x[1]["win_rate"], reverse=True)[:3]
+        lines = [
+            "💾 *Yaddaş Statistikası (30 gün)*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"• Ümumi Ticarət: {stats.get('total_trades', 0)}",
+            f"• Win Rate: {stats.get('win_rate_pct', 0):.1f}%",
+            "",
+            "⏰ *Ən Yaxşı Saatlar (UTC):*",
+        ]
+        for hour, data in best_hours:
+            lines.append(f"• {hour}:00 — Win: {data['win_rate']:.0f}% ({data['trades']} ticarət)")
+        return "\n".join(lines)
+
+    async def _get_lessons_message(self) -> str:
+        lessons = self.trade_journal.get_all_lessons(10)
+        if not lessons:
+            return "Hələ dərs qeydə alınmayıb."
+        lines = ["📚 *Son 10 Öyrənilmiş Dərs:*", "━━━━━━━━━━━━━━━━━━━━━━"]
+        for i, lesson in enumerate(lessons, 1):
+            lines.append(f"{i}. {lesson}")
+        return "\n".join(lines)
+
+    async def _get_weights_message(self) -> str:
+        return self.weight_manager.weights_display
+
+    async def _get_phase_message(self) -> str:
+        stats = self.trade_journal.get_phase_stats(self.phase_manager.current_phase)
+        return self.phase_manager.get_status_message(stats)
+
+    async def _get_patterns_message(self) -> str:
+        golden = self.pattern_memory.get_golden_patterns()
+        toxic = self.pattern_memory.get_toxic_patterns()
+        lines = ["🏆 *Qızıl Nümunələr (Win Rate >70%):*"]
+        if golden:
+            for p in golden[:3]:
+                lines.append(f"• {p['pattern']} — {p['win_rate']}% ({p['total_trades']} ticarət)")
+        else:
+            lines.append("• Hələ yoxdur (minimum 10 ticarət lazımdır)")
+        lines += ["", "⚠️ *Toksik Nümunələr (Win Rate <40%):*"]
+        if toxic:
+            for p in toxic[:3]:
+                lines.append(f"• {p['pattern']} — {p['win_rate']}% ({p['total_trades']} ticarət)")
+        else:
+            lines.append("• Hələ yoxdur")
+        return "\n".join(lines)
+
+    async def _build_scan_report(self, all_signals, actionable, opened) -> str:
+        """3 saatlıq Telegram hesabatı"""
+        now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        phase = self.phase_manager.current_phase
+        day = self.phase_manager.days_in_phase
+        total = self.phase_manager.current_targets["duration_days"]
+        stats = self.trade_journal.get_weekly_stats(days=7)
+        mode = "PAPER" if Settings.TRADING_MODE == "paper" else "LIVE"
+
+        lines = [
+            f"🤖 *TradeX-Pro* | v2.0 | [Faza {phase} — Gün {day}/{total}]",
+            f"⏰ {now} | Mode: {mode}",
+            f"━━━━━━━━━━━━━━━━━━━━━━",
+            f"📡 Analiz: {len(all_signals)} aktiv | Siqnal: {len(actionable)} | Açılan: {len(opened)}",
+            f"",
+        ]
+
+        if actionable:
+            lines.append("🚦 *Aktiv Siqnallar:*")
+            for s in sorted(actionable, key=lambda x: x.final_score, reverse=True)[:3]:
+                direction_emoji = "🟢" if s.direction == "LONG" else "🔴"
+                strength_emoji = "⚡" if s.signal_strength == "STRONG" else "📊"
+                lines += [
+                    f"{direction_emoji}{strength_emoji} *{s.signal_strength} {s.direction}* — {s.symbol}",
+                    f"• Texniki: {s.technical_score:.0f} | GPT: {s.gpt_adjustment:+.0f} | Final: {s.final_score:.0f}/100",
+                    f"• SL: {s.stop_loss:.4f} | TP1: {s.tp1:.4f} | TP2: {s.tp2:.4f}",
+                ]
+                if s.gpt_context:
+                    lines.append(f"• _GPT: {s.gpt_context[:100]}_")
+                lines.append("")
+
+        lines += [
+            f"━━━━━━━━━━━━━━━━━━━━━━",
+            f"💼 *Portfolio:*",
+            f"• Balans: ${self.executor.balance:,.2f}",
+            f"• Bu həftə: {stats.get('win_rate_pct', 0):.0f}% win | ${stats.get('total_pnl_usd', 0):+.2f}",
+            f"• Risk: {'⏸ DAYANDIRILMIŞ' if self._trading_paused or self.risk_manager.status['trading_halted'] else '✅ Aktiv'}",
+        ]
+
+        return "\n".join(lines)
+
+    # ──────────────────────────────────────────────
+    # Başlatma
+    # ──────────────────────────────────────────────
+    async def run(self):
+        """TradeX-Pro-nu işə sal"""
+        await self.initialize()
+
+        # Başlama mesajı
+        if self.telegram:
+            startup_msg = (
+                f"🚀 *TradeX-Pro v2.0 işə salındı!*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Mode: {Settings.TRADING_MODE.upper()}\n"
+                f"• Faza: {self.phase_manager.current_phase} — {self.phase_manager.current_targets['name']}\n"
+                f"• Kapital: ${Settings.INITIAL_CAPITAL:,.0f}\n"
+                f"• AI: {'✅ GPT-4o Aktiv' if self.gpt_client else '⚠️ Demo Rejimdə'}\n"
+                f"• İlk skan: növbəti planlaşdırılmış saatda\n\n"
+                f"Komandalar üçün /help yazın"
+            )
+            await self.telegram.send(startup_msg)
+
+        # Zamanlayıcını başlat
+        self.scheduler.start()
+        logger.info("Zamanlayıcı başladı ✅")
+
+        # Telegram bot-u işə sal (blocking)
+        if self.telegram and self.telegram.app:
+            async with self.telegram.app:
+                await self.telegram.app.start()
+                await self.telegram.app.updater.start_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=["message"],
+                )
+                logger.info("Bot aktiv — Dayandırmaq üçün Ctrl+C")
+                try:
+                    await asyncio.Event().wait()
+                except (KeyboardInterrupt, SystemExit):
+                    pass
+                finally:
+                    await self.telegram.app.updater.stop()
+                    await self.telegram.app.stop()
+                    self.scheduler.shutdown()
+        else:
+            logger.warning("Telegram konfiqurasiya edilməyib — yalnız zamanlayıcı işləyir")
+            try:
+                await asyncio.Event().wait()
+            except (KeyboardInterrupt, SystemExit):
+                self.scheduler.shutdown()
+
+
+async def main():
+    bot = TradeXPro()
+    await bot.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
