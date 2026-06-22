@@ -275,6 +275,22 @@ class TradeJournal:
             """), {"lim": limit}).fetchall()
         return [r[0] for r in rows]
 
+    def get_recent_trades(self, limit: int = 20) -> list:
+        """Son N bağlanmış ticarəti qaytarır — weight analyzer üçün istifadə edilir."""
+        with get_db() as db:
+            rows = db.execute(text("""
+                SELECT id, symbol, direction, pnl_usd, pnl_pct, indicators_triggered
+                FROM trades WHERE pnl_usd IS NOT NULL
+                ORDER BY close_time DESC LIMIT :lim
+            """), {"lim": limit}).mappings().fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            raw = d.get("indicators_triggered")
+            d["indicators_triggered"] = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            result.append(d)
+        return result
+
     def get_performance_by_hour(self) -> dict:
         hour_fn = "EXTRACT(HOUR FROM open_time::timestamptz)" if _is_postgres() \
                   else "strftime('%H', open_time)"

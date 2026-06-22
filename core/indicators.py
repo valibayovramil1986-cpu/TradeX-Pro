@@ -96,15 +96,24 @@ class TechnicalIndicators:
     # ──────────────────────────────────────────────
     # MACD
     # ──────────────────────────────────────────────
-    def macd(self, df: pd.DataFrame) -> dict:
+    def macd(self, df: pd.DataFrame) -> tuple[dict, dict]:
+        """MACD hesabla. (cari_data, əvvəlki_data) tuple-u qaytar.
+        Bu ikinci dəyər crossover aşkarı üçün macd_signal()-a ötürülür."""
         macd_df = self.ta.macd(df["close"], fast=12, slow=26, signal=9)
-        if macd_df is None or macd_df.empty:
-            return {"macd": None, "signal": None, "histogram": None}
-        return {
+        empty = {"macd": None, "signal": None, "histogram": None}
+        if macd_df is None or macd_df.empty or len(macd_df) < 2:
+            return empty, empty
+        current = {
             "macd": float(macd_df.iloc[-1, 0]),
             "signal": float(macd_df.iloc[-1, 1]),
             "histogram": float(macd_df.iloc[-1, 2]),
         }
+        prev = {
+            "macd": float(macd_df.iloc[-2, 0]),
+            "signal": float(macd_df.iloc[-2, 1]),
+            "histogram": float(macd_df.iloc[-2, 2]),
+        }
+        return current, prev
 
     def macd_signal(self, macd_data: dict, prev_macd_data: Optional[dict] = None) -> IndicatorResult:
         if macd_data["macd"] is None:
@@ -332,6 +341,37 @@ class TechnicalIndicators:
             "d": float(stoch_df[cols[1]].iloc[-1]) if len(cols) > 1 else 50.0,
         }
 
+    def stoch_rsi_signal(self, stoch_data: dict) -> IndicatorResult:
+        """
+        Stochastic RSI siqnalı.
+        K < 20 + D < 20 = oversold (bullish), K > 80 + D > 80 = overbought (bearish).
+        K > D crossover = momentum siqnalı.
+        """
+        k = stoch_data.get("k", 50.0)
+        d = stoch_data.get("d", 50.0)
+
+        # Oversold zonada hər ikisi
+        if k <= 20 and d <= 20:
+            strength = (20 - min(k, d)) / 20
+            return IndicatorResult("StochRSI", 10, "bullish", min(strength, 1.0),
+                                   f"StochRSI oversold zonada ({k:.1f}/{d:.1f}) — alış siqnalı")
+        # Overbought zonada hər ikisi
+        elif k >= 80 and d >= 80:
+            strength = (max(k, d) - 80) / 20
+            return IndicatorResult("StochRSI", 10, "bearish", min(strength, 1.0),
+                                   f"StochRSI overbought zonada ({k:.1f}/{d:.1f}) — satış siqnalı")
+        # Bullish crossover (K aşağıdan D-ni kəsdi, 50-dən aşağıda)
+        elif k > d and k <= 50:
+            return IndicatorResult("StochRSI", 5, "bullish", 0.5,
+                                   f"StochRSI bullish momentum ({k:.1f} > {d:.1f})")
+        # Bearish crossover (K yuxarıdan D-ni kəsdi, 50-dən yuxarıda)
+        elif k < d and k >= 50:
+            return IndicatorResult("StochRSI", 5, "bearish", 0.5,
+                                   f"StochRSI bearish momentum ({k:.1f} < {d:.1f})")
+        else:
+            return IndicatorResult("StochRSI", 0, "neutral", 0.0,
+                                   f"StochRSI neytral zonada ({k:.1f}/{d:.1f})")
+
     # ──────────────────────────────────────────────
     # Tam Analiz — Bütün İndikatörləri Birləşdir
     # ──────────────────────────────────────────────
@@ -348,21 +388,23 @@ class TechnicalIndicators:
 
         # Hesablamalar
         ema_vals = self.ema(df)
-        macd_vals = self.macd(df)
+        macd_vals, prev_macd_vals = self.macd(df)   # cari + əvvəlki (crossover üçün)
         rsi_val = self.rsi(df)
         adx_vals = self.adx(df)
         bb_vals = self.bollinger_bands(df)
         sr_vals = self.support_resistance(df)
         atr_val = self.atr(df)
+        stoch_vals = self.stoch_rsi(df)             # 8-ci indikatör
 
         # Siqnallar
         ema_res = self.ema_signal(ema_vals)
-        macd_res = self.macd_signal(macd_vals)
+        macd_res = self.macd_signal(macd_vals, prev_macd_vals)  # crossover işlənir
         rsi_res = self.rsi_signal(rsi_val)
         adx_res = self.adx_signal(adx_vals)
         bb_res = self.bollinger_signal(bb_vals, current_price)
         vol_res = self.volume_signal(df)
         sr_res = self.sr_signal(current_price, sr_vals)
+        stoch_res = self.stoch_rsi_signal(stoch_vals)
 
         indicators = {
             "EMA": ema_res,
@@ -372,6 +414,7 @@ class TechnicalIndicators:
             "Bollinger": bb_res,
             "Volume": vol_res,
             "SR": sr_res,
+            "StochRSI": stoch_res,              # 8-ci indikatör aktiv edildi
         }
 
         # Siqnal sayı (bullish vs bearish)

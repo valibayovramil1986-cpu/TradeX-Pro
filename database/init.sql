@@ -88,8 +88,59 @@ INSERT INTO phase_state (id, current_phase, phase_start_date)
 VALUES (1, '1', NOW())
 ON CONFLICT (id) DO NOTHING;
 
+-- ─────────────────────────────────────────────
+-- Açıq Mövqelər (OrderExecutor tərəfindən idarə edilir)
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS open_positions (
+    trade_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry_price DOUBLE PRECISION,
+    stop_loss DOUBLE PRECISION,
+    take_profit1 DOUBLE PRECISION,
+    take_profit2 DOUBLE PRECISION,
+    take_profit3 DOUBLE PRECISION,
+    units DOUBLE PRECISION,
+    original_units DOUBLE PRECISION,
+    usd_value DOUBLE PRECISION,
+    risk_usd DOUBLE PRECISION,
+    signal_score DOUBLE PRECISION,
+    confidence DOUBLE PRECISION,
+    open_time TIMESTAMPTZ DEFAULT NOW(),
+    phase TEXT,
+    indicators_triggered JSONB DEFAULT '[]',
+    tp1_hit BOOLEAN DEFAULT FALSE,
+    tp2_hit BOOLEAN DEFAULT FALSE,
+    peak_price DOUBLE PRECISION,
+    trailing_stop DOUBLE PRECISION,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ─────────────────────────────────────────────
+-- Balans Vəziyyəti (restart-a davamlı balans)
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS balance_state (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    balance DOUBLE PRECISION NOT NULL,
+    initial_balance DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ─────────────────────────────────────────────
+-- Risk Sayğacları (circuit breaker vəziyyəti)
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS risk_state (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    consecutive_losses INTEGER DEFAULT 0,
+    today_pnl_usd DOUBLE PRECISION DEFAULT 0,
+    week_pnl_usd DOUBLE PRECISION DEFAULT 0,
+    trading_halted INTEGER DEFAULT 0,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- İndekslər
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_phase ON trades(phase);
 CREATE INDEX IF NOT EXISTS idx_trades_close_time ON trades(close_time);
 CREATE INDEX IF NOT EXISTS idx_trades_direction ON trades(direction);
+CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions(symbol);

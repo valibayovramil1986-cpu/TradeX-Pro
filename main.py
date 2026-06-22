@@ -66,8 +66,6 @@ class TradeXPro:
         self.strategy_log = StrategyLog()
 
         # ── Risk & Executor ──
-        phase_mgr_temp = PhaseManager()
-        targets = phase_mgr_temp.current_targets
         risk_params = RiskParams(
             max_risk_per_trade_pct=Settings.MAX_RISK_PER_TRADE,
             max_open_positions=Settings.MAX_OPEN_POSITIONS,
@@ -142,22 +140,27 @@ class TradeXPro:
         logger.info(f"✅ TradeX-Pro hazırdır | {Settings.display()}")
 
     def _init_exchange(self):
-        """CCXT exchange client-i işə sal"""
-        if not Settings.BINANCE_API_KEY:
-            logger.info("Binance API açarı yoxdur — demo data istifadə edilir")
-            return None
+        """CCXT exchange client-i işə sal.
+        API key olmasa belə Binance public endpoint-ləri (OHLCV) üçün qoşulur.
+        """
         try:
             import ccxt
-            exchange = ccxt.binance({
-                "apiKey": Settings.BINANCE_API_KEY,
-                "secret": Settings.BINANCE_SECRET,
-                "sandbox": Settings.TRADING_MODE == "paper",
-                "enableRateLimit": True,
-            })
-            logger.info("Binance qoşuldu ✅")
+            if Settings.BINANCE_API_KEY:
+                exchange = ccxt.binance({
+                    "apiKey": Settings.BINANCE_API_KEY,
+                    "secret": Settings.BINANCE_SECRET,
+                    "enableRateLimit": True,
+                    # sandbox=False: Binance testnet etibarsızdır,
+                    # paper trading simulyasiyası bot daxilindəki OrderExecutor-da idarə edilir
+                })
+                logger.info("Binance API ilə qoşuldu (tam giriş) ✅")
+            else:
+                # API key olmadan da OHLCV çəkmək mümkündür — public endpoint
+                exchange = ccxt.binance({"enableRateLimit": True})
+                logger.info("Binance public rejimində qoşuldu (API key yoxdur, yalnız bazar datası) ✅")
             return exchange
         except Exception as e:
-            logger.error(f"Exchange qoşulması uğursuz: {e}")
+            logger.error(f"Exchange qoşulması uğursuz: {e} — demo data istifadə edilir")
             return None
 
     def _setup_scheduler(self):
@@ -168,6 +171,20 @@ class TradeXPro:
             CronTrigger(hour="0,3,6,9,12,15,18,21", minute=0, timezone="UTC"),
             id="market_scan",
             name="3-Saatlıq Bazar Skanı",
+            coalesce=True,        # Buraxılmış işlər yığılmasın — yalnız bir dəfə işlə
+            max_instances=1,      # Eyni anda yalnız bir nüsxə
+            misfire_grace_time=60,  # 1 dəqiqədən gec başlayarsa — keç
+        )
+
+        # Hər 5 dəqiqədə SL/TP qiymət yoxlaması
+        self.scheduler.add_job(
+            self._price_check,
+            "interval",
+            minutes=5,
+            id="price_check",
+            name="5-Dəqiqəlik SL/TP Yoxlaması",
+            coalesce=True,
+            max_instances=1,
         )
 
         # Gündəlik risk sıfırlanması (gecəyarısı UTC)
@@ -191,6 +208,16 @@ class TradeXPro:
             id="weekly_reset",
         )
 
+        # Gündəlik faza yoxlaması (hər gün 09:00 UTC)
+        # 14 gün (və ya faza müddəti) dolubsa GPT qiymətləndirməsi işlənir
+        self.scheduler.add_job(
+            self._daily_phase_check,
+            CronTrigger(hour=9, minute=0, timezone="UTC"),
+            id="daily_phase_check",
+            coalesce=True,
+            max_instances=1,
+        )
+
         logger.info("Zamanlayıcı konfiqasiya edildi ✅")
 
     # ──────────────────────────────────────────────
@@ -208,14 +235,21 @@ class TradeXPro:
         signals = await self.scanner.run_scan(self.phase_manager.current_phase)
 
         # Siqnalları GPT-4 ilə zənginləşdir
-        actionable = []
+        raw_actionable = []
         if self.contextualizer:
             for signal in signals:
                 if signal.proceed and signal.technical_score >= 55:
                     enriched = await self.contextualizer.enrich_signal(signal, self.signal_engine)
-                    actionable.append(enriched)
+                    raw_actionable.append(enriched)
         else:
-            actionable = [s for s in signals if s.proceed]
+            raw_actionable = [s for s in signals if s.proceed]
+
+        # Hər simvoldan yalnız ən yüksək ballı siqnal saxla (timeframe dublikatlarını sil)
+        best_per_symbol: dict = {}
+        for s in raw_actionable:
+            if s.symbol not in best_per_symbol or s.final_score > best_per_symbol[s.symbol].final_score:
+                best_per_symbol[s.symbol] = s
+        actionable = sorted(best_per_symbol.values(), key=lambda x: x.final_score, reverse=True)
 
         # Ticarətləri icra et
         opened_trades = []
@@ -231,8 +265,11 @@ class TradeXPro:
                     await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
                 break
 
+            # Ardıcıl itkiyə görə azaldılmış risk faizi istifadə et
+            adjusted_risk = self.risk_manager.get_adjusted_risk_pct()
             pos_size = self.risk_manager.calculate_position_size(
-                self.executor.balance, signal.entry_zone_high, signal.stop_loss
+                self.executor.balance, signal.entry_zone_high, signal.stop_loss,
+                risk_pct_override=adjusted_risk,
             )
 
             position = self.executor.open_position(
@@ -254,9 +291,12 @@ class TradeXPro:
             self.pattern_memory.record_trade(trade.indicators_triggered, trade.pnl_usd)
 
             # Refleksiya
+            # Kısmi çıxışda trade_id "abc123_TP1_partial" formatında ola bilər —
+            # DB-dəki əsl ID-ni almaq üçün ilk hissəni al
             reflection_summary = ""
             if self.reflection_engine:
-                reflection = await self.reflection_engine.reflect_on_trade(trade.trade_id)
+                base_trade_id = trade.trade_id.split("_")[0]
+                reflection = await self.reflection_engine.reflect_on_trade(base_trade_id)
                 if reflection:
                     reflection_summary = reflection.get("summary", "")
 
@@ -266,16 +306,50 @@ class TradeXPro:
         # Çəki analizini yoxla (hər 20 ticarətdən sonra)
         all_trades = self.trade_journal.get_weekly_stats(days=30)
         if all_trades.get("total_trades", 0) % 20 == 0 and all_trades.get("total_trades", 0) > 0:
-            recent = []  # Ətraflı ticarət obyektləri lazımdır
+            # Son 20 ticarətin əsl datası ilə analiz et
+            recent = self.trade_journal.get_recent_trades(limit=20)
             changes = self.weight_manager.analyze_and_adjust(recent)
             if changes:
                 new_weights = self.weight_manager.get_signal_weights()
                 self.signal_engine.update_weights(new_weights)
+                logger.info(f"✅ İndikatör çəkiləri yeniləndi: {list(changes.keys())}")
 
         # Hesabat göndər
         report = await self._build_scan_report(signals, actionable, opened_trades)
         if self.telegram:
             await self.telegram.send_scan_report(report)
+
+    async def _price_check(self):
+        """
+        Hər 5 dəqiqədə bir SL/TP yoxla.
+        Tam skan aparmır — yalnız açıq mövqelərin qiymətlərini yoxlayır.
+        """
+        if not self.executor.open_positions:
+            return
+
+        try:
+            prices = self.scanner.get_current_prices()
+            closed = self.executor.check_sl_tp(prices)
+
+            for trade in closed:
+                self.trade_journal.save_trade(vars(trade))
+                self.pattern_memory.record_trade(
+                    trade.indicators_triggered, trade.pnl_usd
+                )
+                reflection_summary = ""
+                if self.reflection_engine and "SL" in trade.exit_reason:
+                    # Yalnız SL vurduqda refleksiya et (TP-lər çox tez-tez baş verir)
+                    reflection = await self.reflection_engine.reflect_on_trade(
+                        trade.trade_id.split("_")[0]
+                    )
+                    if reflection:
+                        reflection_summary = reflection.get("summary", "")
+
+                if self.telegram:
+                    await self.telegram.send_trade_closed(vars(trade), reflection_summary)
+
+        except Exception as e:
+            logger.error(f"Qiymət yoxlama xətası: {e}")
 
     async def _weekly_reflection(self):
         """Həftəlik macro refleksiya"""
@@ -284,6 +358,57 @@ class TradeXPro:
             if reflection and self.telegram:
                 summary = reflection.get("telegram_summary", "Refleksiya məlumatı")
                 await self.telegram.send_weekly_reflection(summary)
+
+    async def _daily_phase_check(self):
+        """
+        Hər gün 09:00 UTC-də çağırılır.
+        Faza müddəti (14 gün) dolubsa GPT qiymətləndirməsi işlənir.
+        Son 6 gündə qiymətləndirmə varsa təkrarlama edilmir.
+        """
+        current_phase = self.phase_manager.current_phase
+        if current_phase == "3":
+            return  # Real ticarətdə avtomatik faza keçidi yoxdur
+
+        days = self.phase_manager.days_in_phase
+        targets = self.phase_manager.current_targets
+        required_days = targets.get("duration_days", 14)
+
+        if days < required_days:
+            logger.debug(f"Faza {current_phase}: {days}/{required_days} gün — hələ vaxt dolmayıb")
+            return
+
+        # Son 6 gündə bu faza üçün qiymətləndirmə varsa keç (spam qarşısı)
+        last_eval = self.strategy_log.get_latest_phase_evaluation(current_phase)
+        if last_eval:
+            logger.debug(f"Faza {current_phase} artıq qiymətləndirilib — keçildi")
+            return
+
+        logger.info(f"🎓 Faza {current_phase} müddəti doldu ({days}/{required_days} gün) — avtomatik qiymətləndirmə başlanır...")
+
+        if not self.reflection_engine:
+            logger.warning("ReflectionEngine yoxdur — GPT qiymətləndirməsi keçildi")
+            return
+
+        evaluation = await self.reflection_engine.evaluate_phase(current_phase, targets)
+        if not evaluation or "error" in evaluation:
+            return
+
+        readiness = evaluation.get("readiness_score", 0)
+        advance = evaluation.get("advance_recommended", False)
+        summary = evaluation.get("telegram_summary", "")
+        threshold = targets.get("readiness_threshold", 65)
+
+        msg = (
+            f"🎓 *Faza {current_phase} Avtomatik Qiymətləndirməsi*\n\n"
+            f"📅 Keçən gün: {days}/{required_days}\n"
+            f"📊 Hazırlıq Balı: *{readiness}/100* (Tələb: {threshold}+)\n"
+            f"{'✅ İrəliləmə tövsiyə edilir!' if advance else '⚠️ Hələ irəliləmə tövsiyə edilmir'}\n\n"
+            f"{summary}\n\n"
+            f"_İrəliləmək üçün /promote əmrini istifadə edin._"
+        )
+
+        if self.telegram:
+            await self.telegram.send_weekly_reflection(msg)
 
     # ──────────────────────────────────────────────
     # Telegram Callback Funksiyaları

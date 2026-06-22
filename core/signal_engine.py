@@ -49,11 +49,12 @@ class SignalWeights:
     support_resistance: float = 15.0
     bollinger_band: float = 10.0
     adx_strength: float = 10.0
+    stoch_rsi: float = 10.0         # 8-ci indikatör
 
     def total(self) -> float:
         return (self.ema_alignment + self.macd_crossover + self.rsi_zone +
                 self.volume_spike + self.support_resistance +
-                self.bollinger_band + self.adx_strength)
+                self.bollinger_band + self.adx_strength + self.stoch_rsi)
 
 
 class SignalEngine:

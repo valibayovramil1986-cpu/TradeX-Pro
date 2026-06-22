@@ -1,15 +1,18 @@
 """
 TradeX-Pro — Pattern Memory
 İndikatör kombinasiyalarının performans izlənməsi (Layer 2 yaddaş)
+PostgreSQL/SQLite dəstəyi — container restart-a davamlı
 """
 
-import json
-import sqlite3
-from pathlib import Path
 from typing import Optional
 from loguru import logger
+from sqlalchemy import text
 
-DB_PATH = Path(__file__).parent.parent / "database" / "tradex.db"
+from database.db import get_db, engine, DATABASE_URL
+
+
+def _is_postgres() -> bool:
+    return DATABASE_URL.startswith("postgresql")
 
 
 class PatternMemory:
@@ -22,67 +25,76 @@ class PatternMemory:
     TOXIC_WIN_RATE = 0.40
     MIN_SAMPLES = 10
 
-    def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or DB_PATH
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
         self._init_db()
+        logger.info(f"PatternMemory qoşuldu ({'PostgreSQL' if _is_postgres() else 'SQLite'})")
 
     def _init_db(self):
-        with self._conn() as conn:
-            conn.executescript("""
+        with engine.connect() as conn:
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS pattern_stats (
                     pattern TEXT PRIMARY KEY,
                     win_count INTEGER DEFAULT 0,
                     loss_count INTEGER DEFAULT 0,
                     total_pnl REAL DEFAULT 0,
-                    last_updated TEXT DEFAULT (datetime('now'))
-                );
-            """)
-
-    def _conn(self):
-        return sqlite3.connect(str(self.db_path))
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.commit()
 
     def _pattern_key(self, indicators: list) -> str:
-        """İndikatör siyahısından unikal açar yarat"""
-        return "+".join(sorted(indicators))
+        return "+".join(sorted(indicators)) if indicators else "unknown"
 
     def record_trade(self, indicators: list, pnl_usd: float):
         """Bir ticarətin nəticəsini nümunəyə əlavə et"""
         pattern = self._pattern_key(indicators)
         won = 1 if pnl_usd > 0 else 0
         lost = 0 if pnl_usd > 0 else 1
-        with self._conn() as conn:
-            conn.execute("""
-                INSERT INTO pattern_stats (pattern, win_count, loss_count, total_pnl)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(pattern) DO UPDATE SET
-                    win_count = win_count + excluded.win_count,
-                    loss_count = loss_count + excluded.loss_count,
-                    total_pnl = total_pnl + excluded.total_pnl,
-                    last_updated = datetime('now')
-            """, (pattern, won, lost, pnl_usd))
+
+        upsert_sql = """
+            INSERT INTO pattern_stats (pattern, win_count, loss_count, total_pnl)
+            VALUES (:pattern, :won, :lost, :pnl)
+            ON CONFLICT (pattern) DO UPDATE SET
+                win_count = pattern_stats.win_count + :won,
+                loss_count = pattern_stats.loss_count + :lost,
+                total_pnl = pattern_stats.total_pnl + :pnl,
+                last_updated = CURRENT_TIMESTAMP
+        """ if _is_postgres() else """
+            INSERT INTO pattern_stats (pattern, win_count, loss_count, total_pnl)
+            VALUES (:pattern, :won, :lost, :pnl)
+            ON CONFLICT (pattern) DO UPDATE SET
+                win_count = pattern_stats.win_count + :won,
+                loss_count = pattern_stats.loss_count + :lost,
+                total_pnl = pattern_stats.total_pnl + :pnl,
+                last_updated = CURRENT_TIMESTAMP
+        """
+
+        with get_db() as db:
+            db.execute(text(upsert_sql), {
+                "pattern": pattern, "won": won, "lost": lost, "pnl": pnl_usd
+            })
 
     def get_pattern_win_rate(self, indicators: list) -> Optional[float]:
-        """Bu indikatör kombinasiyasının tarixdəki qazanma nisbəti"""
         pattern = self._pattern_key(indicators)
-        with self._conn() as conn:
-            row = conn.execute("""
-                SELECT win_count, loss_count FROM pattern_stats WHERE pattern = ?
-            """, (pattern,)).fetchone()
+        with get_db() as db:
+            row = db.execute(text("""
+                SELECT win_count, loss_count FROM pattern_stats WHERE pattern = :p
+            """), {"p": pattern}).fetchone()
         if row and (row[0] + row[1]) >= self.MIN_SAMPLES:
             return row[0] / (row[0] + row[1])
         return None
 
     def get_golden_patterns(self) -> list:
         """Win rate > 70% olan nümunələri qaytar"""
-        with self._conn() as conn:
-            rows = conn.execute("""
+        with get_db() as db:
+            rows = db.execute(text("""
                 SELECT pattern, win_count, loss_count, total_pnl
                 FROM pattern_stats
-                WHERE (win_count + loss_count) >= ?
-                ORDER BY (CAST(win_count AS REAL) / (win_count + loss_count)) DESC
+                WHERE (win_count + loss_count) >= :min
+                ORDER BY (CAST(win_count AS FLOAT) / (win_count + loss_count)) DESC
                 LIMIT 10
-            """, (self.MIN_SAMPLES,)).fetchall()
+            """), {"min": self.MIN_SAMPLES}).fetchall()
+
         golden = []
         for r in rows:
             total = r[1] + r[2]
@@ -96,12 +108,13 @@ class PatternMemory:
 
     def get_toxic_patterns(self) -> list:
         """Win rate < 40% olan nümunələri qaytar"""
-        with self._conn() as conn:
-            rows = conn.execute("""
+        with get_db() as db:
+            rows = db.execute(text("""
                 SELECT pattern, win_count, loss_count, total_pnl
                 FROM pattern_stats
-                WHERE (win_count + loss_count) >= ?
-            """, (self.MIN_SAMPLES,)).fetchall()
+                WHERE (win_count + loss_count) >= :min
+            """), {"min": self.MIN_SAMPLES}).fetchall()
+
         toxic = []
         for r in rows:
             total = r[1] + r[2]
@@ -114,10 +127,6 @@ class PatternMemory:
         return sorted(toxic, key=lambda x: x["win_rate"])
 
     def pattern_score_adjustment(self, indicators: list) -> float:
-        """
-        Bu nümunəyə əsasən siqnal balına düzəliş qaytarır.
-        Qızıl nümunə: +5, Toksik nümunə: -10, Bilinməyən: 0
-        """
         win_rate = self.get_pattern_win_rate(indicators)
         if win_rate is None:
             return 0.0
