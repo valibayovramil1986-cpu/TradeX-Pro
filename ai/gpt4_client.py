@@ -94,15 +94,27 @@ RECENT NEWS CONTEXT:
 MACRO ENVIRONMENT:
 {macro_str}
 
+ADJUSTMENT RULES (strictly follow):
+1. If signal direction is SHORT and fear_greed shows "Fear" or "Extreme Fear":
+   - Signal is ALIGNED with macro sentiment. Adjustment: 0 to -3 only. Set proceed=true.
+2. If signal direction is LONG and fear_greed shows "Fear" or "Extreme Fear":
+   - Apply caution. Adjustment: -5 to -10. Still set proceed=true unless news is severely negative.
+3. "Extreme Fear" alone is NOT enough to set proceed=false or give maximum penalty.
+   Crypto fear environments are normal and create valid SHORT opportunities.
+4. Set proceed=false ONLY for: confirmed black swan events, extreme negative breaking news,
+   or technical score < 55. Do NOT set proceed=false just because of macro sentiment.
+5. Maximum negative adjustment for any reason: -10. Reserve -10 for genuinely bad setups
+   (e.g., LONG during extreme fear WITH negative news simultaneously).
+
 Based on the broader context, provide:
-1. Score adjustment (-20 to +20 points)
-2. Whether to proceed with the trade
+1. Score adjustment (-10 to +10 points, follow rules above)
+2. Whether to proceed with the trade (almost always true unless truly catastrophic)
 3. Brief reasoning (2-3 sentences max)
 4. Key risk factors if any
 
 Output JSON:
 {{
-  "adjustment": <integer -20 to 20>,
+  "adjustment": <integer -10 to 10>,
   "proceed": <boolean>,
   "reasoning": "<2-3 sentence context analysis>",
   "risk_factors": ["<risk1>", "<risk2>"],

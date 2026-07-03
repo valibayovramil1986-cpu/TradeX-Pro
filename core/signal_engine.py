@@ -226,19 +226,28 @@ class SignalEngine:
 
     def apply_gpt_adjustment(self, signal: TradeSignal, adjustment: float,
                              gpt_context: str, proceed: bool) -> TradeSignal:
-        """GPT-4-dən gələn düzəlişi siqnala tətbiq et"""
+        """GPT-4-dən gələn düzəlişi siqnala tətbiq et.
+
+        Qərar məntiqi:
+        - Giriş qapısı: texniki bal ≥ MODERATE_THRESHOLD AND GPT proceed=True.
+        - final_score yalnız display/journal üçün saxlanılır, qapı rolunu oynamır.
+        - Bu sayədə makro penaltilər (məs. "Extreme Fear" → -10) texniki cəhətdən
+          keçərli siqnalları bloklamır; GPT yalnız açıq "proceed=False" ilə bloklaya bilər.
+        """
         signal.gpt_adjustment = adjustment
         signal.final_score = min(max(signal.technical_score + adjustment, 0), 100)
         signal.gpt_context = gpt_context
-        signal.proceed = proceed and signal.final_score >= self.MODERATE_THRESHOLD
 
-        # Güc yenilə
+        # Giriş qapısı: texniki bal keçərsə VƏ GPT açıq "proceed=False" deməyibsə
+        signal.proceed = (signal.technical_score >= self.MODERATE_THRESHOLD) and proceed
+
+        # Güc final_score əsasında (göstərmək + journal üçün)
         if signal.final_score >= self.STRONG_THRESHOLD:
             signal.signal_strength = "STRONG"
         elif signal.final_score >= self.MODERATE_THRESHOLD:
             signal.signal_strength = "MODERATE"
         else:
             signal.signal_strength = "WEAK"
-            signal.proceed = False
+        # Not: WEAK görünsə də proceed=True ola bilər
 
         return signal
