@@ -57,6 +57,26 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # ── Streamlit Dashboard ──────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: tradex_dashboard
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://tradex:${POSTGRES_PASSWORD}@postgres:5432/tradex_pro
+    ports:
+      - "8501:8501"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
 volumes:
   postgres_data:
     driver: local
