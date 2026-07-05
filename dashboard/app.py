@@ -55,7 +55,7 @@ def load_trades() -> pd.DataFrame:
 def load_open_positions() -> pd.DataFrame:
     return query("""
         SELECT trade_id, symbol, direction, entry_price,
-               stop_loss, take_profit1, take_profit2,
+               stop_loss, tp1, tp2,
                usd_value, open_time
         FROM open_positions
         ORDER BY open_time DESC
