@@ -54,31 +54,29 @@ st.markdown("""
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 REFRESH_SEC  = 30   # 30 saniyədə bir yenilə
 
-# ── DB — keş yoxdur, hər dəfə təzə bağlantı ─────────────────
-def get_engine():
-    url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
-    return create_engine(url, pool_pre_ping=True,
-                         connect_args={"options": "-c statement_timeout=5000"})
-
-# TTL=25s — hər rerun-da 25 saniyə keçibsə təzə data çəkir
+# ── DB ───────────────────────────────────────────────────────
 @st.cache_data(ttl=25)
 def load_all():
-    eng = get_engine()
+    """Hər 25 saniyədə bir DB-dən təzə data çəkir."""
+    url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+    eng = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0)
+
     def q(sql):
         try:
             with eng.connect() as c:
-                # READ COMMITTED — stale read olmur
-                c.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
                 return pd.read_sql(text(sql), c)
         except Exception as e:
+            st.error(f"DB xəta: {e}")
             return pd.DataFrame()
 
-    return {
-        "trades":   q("SELECT * FROM trades WHERE pnl_usd IS NOT NULL ORDER BY close_time DESC"),
-        "opens":    q("SELECT * FROM open_positions ORDER BY open_time DESC"),
-        "bal":      q("SELECT balance, initial_balance FROM balance_state WHERE id=1"),
-        "risk":     q("SELECT trading_halted, consecutive_losses, today_pnl_usd FROM risk_state WHERE id=1"),
+    result = {
+        "trades": q("SELECT * FROM trades WHERE pnl_usd IS NOT NULL ORDER BY close_time DESC"),
+        "opens":  q("SELECT * FROM open_positions ORDER BY open_time DESC"),
+        "bal":    q("SELECT balance, initial_balance FROM balance_state WHERE id=1"),
+        "risk":   q("SELECT trading_halted, consecutive_losses, today_pnl_usd FROM risk_state WHERE id=1"),
     }
+    eng.dispose()
+    return result
 
 # ── Məlumat yüklə ────────────────────────────────────────────
 data     = load_all()
