@@ -14,17 +14,21 @@ from core.risk_manager import RiskManager
 from core.order_executor import OrderExecutor
 
 
-# Skan ediləcək aktivlər — yalnız Binance-də olan simvollar
+# Skan ediləcək aktivlər — Binance-də yüksək likvidli cütlər
 DEFAULT_SYMBOLS = {
     "crypto": [
-        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
-        "ADA/USDT", "XRP/USDT", "DOGE/USDT", "POL/USDT",
-        "AVAX/USDT", "LINK/USDT", "DOT/USDT", "TRX/USDT",
+        # Tier 1 — Ən yüksək likvidlik
+        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
+        # Tier 2 — Yüksək həcm
+        "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+        "TRX/USDT", "MATIC/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT",
+        # Tier 3 — Orta həcm, yüksək uçuculuq
+        "INJ/USDT", "ARB/USDT", "OP/USDT", "SUI/USDT", "APT/USDT",
+        "FET/USDT", "WLD/USDT", "NEAR/USDT", "FIL/USDT", "AAVE/USDT",
     ],
-    # Forex Binance-də dəstəklənmir — gələcəkdə ayrı exchange əlavə olunacaq
 }
 
-TIMEFRAMES = ["1h", "4h"]   # Çox timeframe analiz
+TIMEFRAMES = ["1h", "4h"]   # Çox timeframe analiz — 4h trend, 1h giriş
 
 
 class MarketScanner:
@@ -45,20 +49,21 @@ class MarketScanner:
         self.last_scan_results: list[TradeSignal] = []
         logger.info("MarketScanner işə salındı ✅")
 
-    async def run_scan(self, phase: str = "1") -> list[TradeSignal]:
+    async def run_scan(self) -> list[TradeSignal]:
         """
-        Tam bazar skanını icra et.
-        Siqnalları topla, AI kontekstini əlavə et, icra et.
+        Tam bazar skanını icra et — faza məhdudiyyətsiz.
+        25 aktiv, 2 timeframe = 50 analiz/skan.
         """
         scan_start = datetime.now(timezone.utc)
-        logger.info(f"🔍 Bazar skanı başlandı: {scan_start.strftime('%H:%M UTC')}")
+        logger.info(f"🔍 Bazar skanı başlandı: {scan_start.strftime('%H:%M UTC')} | "
+                    f"{sum(len(s) for s in DEFAULT_SYMBOLS.values())} aktiv")
 
         all_signals = []
 
         for category, symbols in DEFAULT_SYMBOLS.items():
             for symbol in symbols:
                 try:
-                    signals = await self._analyze_symbol(symbol, category, phase)
+                    signals = await self._analyze_symbol(symbol, category)
                     all_signals.extend(signals)
                 except Exception as e:
                     logger.error(f"{symbol} analiz xətası: {e}")
@@ -72,15 +77,14 @@ class MarketScanner:
         self.last_scan_time = scan_start
 
         duration = (datetime.now(timezone.utc) - scan_start).total_seconds()
-        logger.info(f"✅ Skan tamamlandı: {len(all_signals)} aktiv analiz edildi, "
-                    f"{len(actionable)} siqnal tapıldı | {duration:.1f}s")
+        logger.info(f"✅ Skan tamamlandı: {len(all_signals)} analiz, "
+                    f"{len(actionable)} siqnal | {duration:.1f}s")
 
         return all_signals
 
-    async def _analyze_symbol(self, symbol: str, category: str,
-                              phase: str) -> list[TradeSignal]:
+    async def _analyze_symbol(self, symbol: str, category: str) -> list[TradeSignal]:
         """Bir simvolu bütün timeframe-lərdə analiz et.
-        Qeyd: Risk yoxlaması BURADA edilmir — yalnız icra anında yoxlanılır.
+        Risk yoxlaması BURADA edilmir — yalnız icra anında yoxlanılır.
         Bu sayədə risk dayandırıldıqda belə texniki siqnallar görünür.
         """
         signals = []

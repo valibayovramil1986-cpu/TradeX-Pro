@@ -96,14 +96,14 @@ class TradeXPro:
         weights = self.weight_manager.get_signal_weights()
         self.signal_engine = SignalEngine(weights=weights)
 
-        # Exchange client (optional — None = demo data)
-        exchange_client = self._init_exchange()
+        # Exchange client — həm OHLCV skan üçün, həm live order üçün saxlanılır
+        self._exchange_client = self._init_exchange()
 
         self.scanner = MarketScanner(
             signal_engine=self.signal_engine,
             risk_manager=self.risk_manager,
             executor=self.executor,
-            exchange_client=exchange_client,
+            exchange_client=self._exchange_client,
         )
 
         # ── Faza Meneceri ──
@@ -224,17 +224,18 @@ class TradeXPro:
     # Əsas Skan Prosesi
     # ──────────────────────────────────────────────
     async def _scheduled_scan(self):
-        """3 saatdan bir çağırılan əsas skan"""
+        """3 saatdan bir çağırılan əsas skan — faza məhdudiyyətsiz"""
         if self._trading_paused:
             logger.info("Ticarət dayandırılıb — skan keçildi")
             return
 
         logger.info(f"⏰ Planlaşdırılmış skan: {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
 
-        # Texniki skan
-        signals = await self.scanner.run_scan(self.phase_manager.current_phase)
+        # Texniki skan — faza parametri artıq istifadə edilmir
+        signals = await self.scanner.run_scan()
 
         # Siqnalları GPT-4 ilə zənginləşdir
+        # Yalnız hər timeframe cütündən ƏVVƏL texniki filtr tətbiq et
         raw_actionable = []
         if self.contextualizer:
             for signal in signals:
@@ -245,10 +246,30 @@ class TradeXPro:
             raw_actionable = [s for s in signals if s.proceed]
 
         # Hər simvoldan yalnız ən yüksək ballı siqnal saxla (timeframe dublikatlarını sil)
+        # 4h və 1h EYNI istiqamətdədirsə — confluence olaraq bonus ver
         best_per_symbol: dict = {}
+        confluence_bonus: dict = {}
         for s in raw_actionable:
-            if s.symbol not in best_per_symbol or s.final_score > best_per_symbol[s.symbol].final_score:
-                best_per_symbol[s.symbol] = s
+            key = s.symbol
+            if key not in best_per_symbol:
+                best_per_symbol[key] = s
+                confluence_bonus[key] = {"directions": [s.direction], "timeframes": [s.timeframe]}
+            else:
+                # Eyni simvol — başqa timeframe
+                cb = confluence_bonus[key]
+                cb["directions"].append(s.direction)
+                cb["timeframes"].append(s.timeframe)
+                # 4h + 1h eyni istiqamətdədirsə: +5 bonus
+                if len(set(cb["directions"])) == 1 and len(cb["timeframes"]) > 1:
+                    if s.final_score > best_per_symbol[key].final_score:
+                        best_per_symbol[key] = s
+                    best_per_symbol[key].final_score = min(
+                        best_per_symbol[key].final_score + 5, 100
+                    )
+                    logger.info(f"✨ {key} MTF confluence: 4h+1h eyni istiqamət — +5 bonus")
+                elif s.final_score > best_per_symbol[key].final_score:
+                    best_per_symbol[key] = s
+
         actionable = sorted(best_per_symbol.values(), key=lambda x: x.final_score, reverse=True)
 
         # Ticarətləri icra et
@@ -265,6 +286,13 @@ class TradeXPro:
                     await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
                 break
 
+            # Korrelyasiya filtri: BTC+ETH+BNB eyni anda açılmasın
+            correlated = {"BTC/USDT", "ETH/USDT", "BNB/USDT"}
+            open_symbols = {p.symbol for p in self.executor.open_positions.values()}
+            if signal.symbol in correlated and len(correlated & open_symbols) >= 2:
+                logger.info(f"⏭ {signal.symbol} — Korrelyasiya limiti (BTC/ETH/BNB max 2)")
+                continue
+
             # Ardıcıl itkiyə görə azaldılmış risk faizi istifadə et
             adjusted_risk = self.risk_manager.get_adjusted_risk_pct()
             pos_size = self.risk_manager.calculate_position_size(
@@ -275,7 +303,8 @@ class TradeXPro:
             position = self.executor.open_position(
                 signal, pos_size,
                 confidence=signal.final_score / 10,
-                phase=self.phase_manager.current_phase,
+                phase="live",
+                exchange=self._exchange_client,
             )
 
             if position and self.telegram:
@@ -597,17 +626,15 @@ class TradeXPro:
     async def _build_scan_report(self, all_signals, actionable, opened) -> str:
         """3 saatlıq Telegram hesabatı"""
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        phase = self.phase_manager.current_phase
-        day = self.phase_manager.days_in_phase
-        total = self.phase_manager.current_targets["duration_days"]
         stats = self.trade_journal.get_weekly_stats(days=7)
-        mode = "PAPER" if Settings.TRADING_MODE == "paper" else "LIVE"
+        mode = "PAPER" if Settings.TRADING_MODE == "paper" else "🔴 LIVE"
+        total_trades = stats.get("total_trades", 0)
 
         lines = [
-            f"🤖 *TradeX-Pro* | v2.0 | [Faza {phase} — Gün {day}/{total}]",
-            f"⏰ {now} | Mode: {mode}",
+            f"🤖 *TradeX-Pro* | v2.0 | {mode}",
+            f"⏰ {now} | Cəmi ticarət: {total_trades}",
             f"━━━━━━━━━━━━━━━━━━━━━━",
-            f"📡 Analiz: {len(all_signals)} aktiv | Siqnal: {len(actionable)} | Açılan: {len(opened)}",
+            f"📡 Analiz: {len(all_signals)} | Siqnal: {len(actionable)} | Açılan: {len(opened)}",
             f"",
         ]
 
