@@ -141,23 +141,33 @@ class TradeXPro:
 
     def _init_exchange(self):
         """CCXT exchange client-i işə sal.
-        API key olmasa belə Binance public endpoint-ləri (OHLCV) üçün qoşulur.
+        BINANCE_FUTURES=true  → USD-M Futures (LONG+SHORT, 1x leverage default)
+        BINANCE_FUTURES=false → Spot (yalnız LONG siqnalları icra edilir)
+        API key olmasa belə public OHLCV üçün qoşulur.
         """
         try:
             import ccxt
-            if Settings.BINANCE_API_KEY:
-                exchange = ccxt.binance({
-                    "apiKey": Settings.BINANCE_API_KEY,
-                    "secret": Settings.BINANCE_SECRET,
-                    "enableRateLimit": True,
-                    # sandbox=False: Binance testnet etibarsızdır,
-                    # paper trading simulyasiyası bot daxilindəki OrderExecutor-da idarə edilir
-                })
-                logger.info("Binance API ilə qoşuldu (tam giriş) ✅")
+            base_cfg = {
+                "apiKey": Settings.BINANCE_API_KEY or None,
+                "secret": Settings.BINANCE_SECRET or None,
+                "enableRateLimit": True,
+            }
+
+            if Settings.BINANCE_FUTURES:
+                base_cfg["options"] = {"defaultType": "future"}
+                exchange = ccxt.binance(base_cfg)
+                if Settings.BINANCE_API_KEY:
+                    # Leverage 1x — Futures-də borclama yoxdur, yalnız hedging
+                    logger.info("Binance USD-M Futures qoşuldu ✅ (LONG+SHORT aktiv)")
+                else:
+                    logger.info("Binance Futures public rejim (yalnız bazar datası) ✅")
             else:
-                # API key olmadan da OHLCV çəkmək mümkündür — public endpoint
-                exchange = ccxt.binance({"enableRateLimit": True})
-                logger.info("Binance public rejimində qoşuldu (API key yoxdur, yalnız bazar datası) ✅")
+                exchange = ccxt.binance(base_cfg)
+                if Settings.BINANCE_API_KEY:
+                    logger.info("Binance Spot qoşuldu ✅ (yalnız LONG siqnalları icra ediləcək)")
+                else:
+                    logger.info("Binance Spot public rejim (yalnız bazar datası) ✅")
+
             return exchange
         except Exception as e:
             logger.error(f"Exchange qoşulması uğursuz: {e} — demo data istifadə edilir")
@@ -274,8 +284,15 @@ class TradeXPro:
 
         # Ticarətləri icra et
         opened_trades = []
+        is_spot_live = (Settings.TRADING_MODE == "live" and not Settings.BINANCE_FUTURES)
+
         for signal in actionable:
             if not signal.proceed or signal.direction == "NO_TRADE":
+                continue
+
+            # Spot live rejimində SHORT əmrləri filtrlə — Spot-da shorting olmaz
+            if is_spot_live and signal.direction == "SHORT":
+                logger.debug(f"⏭ {signal.symbol} SHORT — Spot rejimində SHORT dəstəklənmir")
                 continue
 
             risk_check = self.risk_manager.check_trade_allowed(
@@ -286,7 +303,7 @@ class TradeXPro:
                     await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
                 break
 
-            # Korrelyasiya filtri: BTC+ETH+BNB eyni anda açılmasın
+            # Korrelyasiya filtri: BTC+ETH+BNB eyni anda max 2 açıq olsun
             correlated = {"BTC/USDT", "ETH/USDT", "BNB/USDT"}
             open_symbols = {p.symbol for p in self.executor.open_positions.values()}
             if signal.symbol in correlated and len(correlated & open_symbols) >= 2:
