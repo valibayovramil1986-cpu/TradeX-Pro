@@ -175,15 +175,16 @@ class TradeXPro:
 
     def _setup_scheduler(self):
         """3 saatlıq skan zamanlayıcısı"""
-        # Hər 3 saatdan bir skan
+        # Hər 1 saatda bir skan (test rejimi: daha tez-tez, daha çox ticarət nümunəsi)
         self.scheduler.add_job(
             self._scheduled_scan,
-            CronTrigger(hour="0,3,6,9,12,15,18,21", minute=0, timezone="UTC"),
+            "interval",
+            hours=1,
             id="market_scan",
-            name="3-Saatlıq Bazar Skanı",
-            coalesce=True,        # Buraxılmış işlər yığılmasın — yalnız bir dəfə işlə
-            max_instances=1,      # Eyni anda yalnız bir nüsxə
-            misfire_grace_time=60,  # 1 dəqiqədən gec başlayarsa — keç
+            name="Saatlıq Bazar Skanı",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=120,
         )
 
         # Hər 5 dəqiqədə SL/TP qiymət yoxlaması
