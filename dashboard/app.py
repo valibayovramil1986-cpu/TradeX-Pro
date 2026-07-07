@@ -52,26 +52,40 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-REFRESH_SEC  = 60
+REFRESH_SEC  = 30   # 30 saniyədə bir yenilə
 
-# ── DB ────────────────────────────────────────────────────────
-@st.cache_resource
+# ── DB — keş yoxdur, hər dəfə təzə bağlantı ─────────────────
 def get_engine():
     url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(url, pool_pre_ping=True,
+                         connect_args={"options": "-c statement_timeout=5000"})
 
-def q(sql, params=None):
-    try:
-        with get_engine().connect() as c:
-            return pd.read_sql(text(sql), c, params=params)
-    except:
-        return pd.DataFrame()
+# TTL=25s — hər rerun-da 25 saniyə keçibsə təzə data çəkir
+@st.cache_data(ttl=25)
+def load_all():
+    eng = get_engine()
+    def q(sql):
+        try:
+            with eng.connect() as c:
+                # READ COMMITTED — stale read olmur
+                c.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+                return pd.read_sql(text(sql), c)
+        except Exception as e:
+            return pd.DataFrame()
+
+    return {
+        "trades":   q("SELECT * FROM trades WHERE pnl_usd IS NOT NULL ORDER BY close_time DESC"),
+        "opens":    q("SELECT * FROM open_positions ORDER BY open_time DESC"),
+        "bal":      q("SELECT balance, initial_balance FROM balance_state WHERE id=1"),
+        "risk":     q("SELECT trading_halted, consecutive_losses, today_pnl_usd FROM risk_state WHERE id=1"),
+    }
 
 # ── Məlumat yüklə ────────────────────────────────────────────
-trades   = q("SELECT * FROM trades WHERE pnl_usd IS NOT NULL ORDER BY close_time DESC")
-opens    = q("SELECT * FROM open_positions ORDER BY open_time DESC")
-bal_row  = q("SELECT balance, initial_balance FROM balance_state WHERE id=1")
-risk_row = q("SELECT trading_halted, consecutive_losses, today_pnl_usd FROM risk_state WHERE id=1")
+data     = load_all()
+trades   = data["trades"]
+opens    = data["opens"]
+bal_row  = data["bal"]
+risk_row = data["risk"]
 
 balance  = float(bal_row["balance"].iloc[0])        if not bal_row.empty  else 1000.0
 initial  = float(bal_row["initial_balance"].iloc[0]) if not bal_row.empty  else 1000.0
@@ -100,15 +114,21 @@ status_dot = "dot-red" if is_live else "dot-green"
 status_lbl = "Canlı Ticarət" if is_live else "Test Rejimi"
 
 # ── Header ────────────────────────────────────────────────────
-st.markdown(f"""
-<div style="margin-bottom:24px;">
-  <div style="color:#fff; font-size:22px; font-weight:700;">🤖 TradeX-Pro Dashboard</div>
-  <div style="color:#8892a4; font-size:13px; margin-top:4px;">
-    <span class="live-dot {status_dot}"></span>{status_lbl} &nbsp;|&nbsp;
-    {mode_label} &nbsp;|&nbsp; {now_str}
-  </div>
-</div>
-""", unsafe_allow_html=True)
+hcol1, hcol2 = st.columns([5, 1])
+with hcol1:
+    st.markdown(f"""
+    <div style="margin-bottom:16px;">
+      <div style="color:#fff; font-size:22px; font-weight:700;">🤖 TradeX-Pro Dashboard</div>
+      <div style="color:#8892a4; font-size:13px; margin-top:4px;">
+        <span class="live-dot {status_dot}"></span>{status_lbl} &nbsp;|&nbsp;
+        {mode_label} &nbsp;|&nbsp; Son yeniləmə: {now_str}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+with hcol2:
+    if st.button("🔄 Yenilə", use_container_width=True):
+        load_all.clear()
+        st.rerun()
 
 # ── KPI Kartları ──────────────────────────────────────────────
 def kpi(col, label, value, sub=None, sub_type="neu"):
@@ -286,5 +306,7 @@ st.markdown(f"""
   Hər {REFRESH_SEC}s yenilənir
 </div>""", unsafe_allow_html=True)
 
+# Auto-refresh: keş TTL (25s) + yenilənmə dövrü (30s)
 time.sleep(REFRESH_SEC)
+load_all.clear()   # keşi zorla sil — təzə data gəlsin
 st.rerun()
