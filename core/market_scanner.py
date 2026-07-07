@@ -79,7 +79,10 @@ class MarketScanner:
 
     async def _analyze_symbol(self, symbol: str, category: str,
                               phase: str) -> list[TradeSignal]:
-        """Bir simvolu bütün timeframe-lərdə analiz et"""
+        """Bir simvolu bütün timeframe-lərdə analiz et.
+        Qeyd: Risk yoxlaması BURADA edilmir — yalnız icra anında yoxlanılır.
+        Bu sayədə risk dayandırıldıqda belə texniki siqnallar görünür.
+        """
         signals = []
 
         for timeframe in TIMEFRAMES:
@@ -90,16 +93,6 @@ class MarketScanner:
                     continue
 
                 signal = self.signal_engine.analyze(df, symbol, timeframe)
-
-                # Risk yoxla
-                risk_check = self.risk_manager.check_trade_allowed(
-                    self.executor.balance, self.executor.initial_balance
-                )
-
-                if not risk_check.allowed:
-                    signal.proceed = False
-                    signal.reasoning += f" | Risk: {risk_check.reason}"
-
                 signals.append(signal)
 
             except Exception as e:

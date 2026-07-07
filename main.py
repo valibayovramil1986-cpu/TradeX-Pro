@@ -362,28 +362,51 @@ class TradeXPro:
     async def _daily_phase_check(self):
         """
         Hər gün 09:00 UTC-də çağırılır.
-        Faza müddəti (14 gün) dolubsa GPT qiymətləndirməsi işlənir.
-        Son 6 gündə qiymətləndirmə varsa təkrarlama edilmir.
+
+        Faza keçid məntiqi:
+        1. Müddət (14 gün) dolmalıdır VƏ
+        2. Min ticarət sayı (40) əldə edilməlidir.
+        Əgər müddət dolub amma ticarət sayı çatmırsa, faza uzadılır (tıxanmır).
         """
         current_phase = self.phase_manager.current_phase
         if current_phase == "3":
-            return  # Real ticarətdə avtomatik faza keçidi yoxdur
+            return
 
         days = self.phase_manager.days_in_phase
         targets = self.phase_manager.current_targets
         required_days = targets.get("duration_days", 14)
+        min_trades = targets.get("min_trades", 40)
+
+        # Ticarət statistikasını al
+        stats = self.trade_journal.get_phase_stats(current_phase)
+        total_trades = stats.get("total_trades", 0)
 
         if days < required_days:
             logger.debug(f"Faza {current_phase}: {days}/{required_days} gün — hələ vaxt dolmayıb")
             return
 
-        # Son 6 gündə bu faza üçün qiymətləndirmə varsa keç (spam qarşısı)
+        # Müddət dolub — amma min ticarət sayı yetərsizdirsə uzat
+        if total_trades < min_trades:
+            logger.info(
+                f"⏳ Faza {current_phase} müddəti dolub ({days} gün) amma "
+                f"ticarət sayı ({total_trades}/{min_trades}) çatışmır — faza uzadılır"
+            )
+            if self.telegram:
+                await self.telegram.send(
+                    f"⏳ *Faza {current_phase} uzadıldı*\n"
+                    f"• Gün: {days} (14 gün dolub)\n"
+                    f"• Ticarət: {total_trades}/{min_trades} ❌\n"
+                    f"Minimum {min_trades} ticarətə çatana kimi Faza {current_phase} davam edir."
+                )
+            return
+
+        # Hər iki şərt yerinə yetirilib — GPT qiymətləndirməsi
         last_eval = self.strategy_log.get_latest_phase_evaluation(current_phase)
         if last_eval:
             logger.debug(f"Faza {current_phase} artıq qiymətləndirilib — keçildi")
             return
 
-        logger.info(f"🎓 Faza {current_phase} müddəti doldu ({days}/{required_days} gün) — avtomatik qiymətləndirmə başlanır...")
+        logger.info(f"🎓 Faza {current_phase} tamamlandı ({days} gün, {total_trades} ticarət) — qiymətləndirmə başlanır")
 
         if not self.reflection_engine:
             logger.warning("ReflectionEngine yoxdur — GPT qiymətləndirməsi keçildi")
@@ -400,7 +423,7 @@ class TradeXPro:
 
         msg = (
             f"🎓 *Faza {current_phase} Avtomatik Qiymətləndirməsi*\n\n"
-            f"📅 Keçən gün: {days}/{required_days}\n"
+            f"📅 Keçən gün: {days} | Ticarət: {total_trades}/{min_trades}\n"
             f"📊 Hazırlıq Balı: *{readiness}/100* (Tələb: {threshold}+)\n"
             f"{'✅ İrəliləmə tövsiyə edilir!' if advance else '⚠️ Hələ irəliləmə tövsiyə edilmir'}\n\n"
             f"{summary}\n\n"

@@ -229,6 +229,16 @@ class RiskManager:
 
     def reset_daily_stats(self):
         self._today_pnl_usd = 0.0
+        # Ardıcıl itki sayğacını da hər gün sıfırla — köhnə itkiLər yeni günü
+        # bloklamasın. Circuit breaker yalnız eyni gün içindəki ardıcıl itkiLərə
+        # reaksiya verməlidir.
+        if self._consecutive_losses > 0:
+            logger.info(f"Gündəlik sıfırlama: ardıcıl itki sayğacı {self._consecutive_losses} → 0")
+            self._consecutive_losses = 0
+        # trading_halted-ı da sıfırla (əgər drawdown deyil, consecutive loss-dan gəlibsə)
+        if self._trading_halted:
+            self._trading_halted = False
+            logger.info("Gündəlik sıfırlama: ticarət yenidən aktivləşdirildi")
         self._save_state()
         logger.info("Gündəlik risk sayğacları sıfırlandı")
 
