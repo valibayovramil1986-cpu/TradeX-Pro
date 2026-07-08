@@ -285,15 +285,17 @@ class TradeXPro:
 
         # Ticarətləri icra et
         opened_trades = []
+        # SHORT filtr: yalnız real Spot live-da blokla
+        # Paper rejimdə həm LONG həm SHORT simulyasiya edilir
         is_spot_live = (Settings.TRADING_MODE == "live" and not Settings.BINANCE_FUTURES)
 
         for signal in actionable:
             if not signal.proceed or signal.direction == "NO_TRADE":
                 continue
 
-            # Spot live rejimində SHORT əmrləri filtrlə — Spot-da shorting olmaz
+            # Real Spot live-da SHORT mümkün deyil
             if is_spot_live and signal.direction == "SHORT":
-                logger.debug(f"⏭ {signal.symbol} SHORT — Spot rejimində SHORT dəstəklənmir")
+                logger.debug(f"⏭ {signal.symbol} SHORT — Spot live rejimində dəstəklənmir")
                 continue
 
             risk_check = self.risk_manager.check_trade_allowed(
