@@ -108,8 +108,9 @@ class TradexBot:
         if not await self._auth_check(update):
             return
         msg = (
-            "🤖 *TradeX-Pro v2.0* aktivdir!\n\n"
-            "OpenAI GPT-4o + Self-Reflection + Memory sistemi ilə tam avtomatik ticarət botu.\n\n"
+            "🤖 *TradeX-Pro v3.0 Multi-Agent* aktivdir!\n\n"
+            "OpenAI GPT-4o + Multi-Agent Consensus + Self-Reflection + Memory sistemi ilə "
+            "tam avtomatik ticarət botu.\n\n"
             "Komandalar üçün /help yazın."
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
