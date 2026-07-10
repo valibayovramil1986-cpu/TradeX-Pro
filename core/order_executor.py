@@ -128,13 +128,6 @@ class OrderExecutor:
                     created_at {ts}
                 )
             """))
-            # Miqrasiya: mövcud DB-lərdə yeni sütunlar olmaya bilər
-            for col, ddl in [("realized_pnl", "REAL DEFAULT 0"),
-                             ("sl_order_id", "TEXT DEFAULT ''")]:
-                try:
-                    conn.execute(text(f"ALTER TABLE open_positions ADD COLUMN {col} {ddl}"))
-                except Exception:
-                    pass  # sütun artıq var
             conn.execute(text(f"""
                 CREATE TABLE IF NOT EXISTS balance_state (
                     id INTEGER PRIMARY KEY,
@@ -144,6 +137,17 @@ class OrderExecutor:
                 )
             """))
             conn.commit()
+
+        # Miqrasiya: hər ALTER AYRICA bağlantıda — Postgres-də uğursuz statement
+        # tranzaksiyanı abort edir və eyni bağlantıdakı növbəti sorğular da sınır.
+        for col, ddl in [("realized_pnl", "REAL DEFAULT 0"),
+                         ("sl_order_id", "TEXT DEFAULT ''")]:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE open_positions ADD COLUMN {col} {ddl}"))
+                    conn.commit()
+            except Exception:
+                pass  # sütun artıq var
 
     def _load_balance(self, default: float) -> float:
         """DB-dən saxlanılmış balansı VƏ initial_balance-ı yüklə (O5 düzəlişi)"""

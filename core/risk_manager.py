@@ -79,12 +79,15 @@ class RiskManager:
                     updated_at {ts}
                 )
             """))
-            # Miqrasiya: mövcud DB-lərdə halt_reason olmaya bilər
-            try:
-                conn.execute(text("ALTER TABLE risk_state ADD COLUMN halt_reason TEXT DEFAULT ''"))
-            except Exception:
-                pass
             conn.commit()
+
+        # Miqrasiya AYRICA bağlantıda (Postgres aborted-transaction problemi)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE risk_state ADD COLUMN halt_reason TEXT DEFAULT ''"))
+                conn.commit()
+        except Exception:
+            pass  # sütun artıq var
 
     def _load_state(self):
         """DB-dən risk sayğaclarını yüklə"""
