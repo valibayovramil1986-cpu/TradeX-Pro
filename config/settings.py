@@ -25,9 +25,6 @@ class Settings:
     # ── Birjalar ───────────────────────────────
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_SECRET: str = os.getenv("BINANCE_SECRET", "")
-    BINANCE_FUTURES: bool = os.getenv("BINANCE_FUTURES", "false").lower() == "true"
-    # BINANCE_FUTURES=false → Spot (yalnız LONG)
-    # BINANCE_FUTURES=true  → USD-M Futures (LONG + SHORT, leverage)
     ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "")
     ALPACA_SECRET: str = os.getenv("ALPACA_SECRET", "")
 

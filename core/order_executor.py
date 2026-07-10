@@ -237,8 +237,7 @@ class OrderExecutor:
     # Mövqe Aç
     # ──────────────────────────────────────────────
     def open_position(self, signal: TradeSignal, pos_size: PositionSize,
-                      confidence: float, phase: str,
-                      exchange=None) -> Optional["OpenPosition"]:
+                      confidence: float, phase: str) -> Optional[OpenPosition]:
         if signal.direction == "NO_TRADE" or not signal.proceed:
             return None
         if pos_size.units <= 0:
@@ -276,15 +275,14 @@ class OrderExecutor:
             logger.info(f"[PAPER] Mövqe açıldı: {signal.symbol} {signal.direction} "
                         f"@ {entry:.4f} | ID: {trade_id}")
         else:
-            # Live mode — real order göndər
-            success = self._place_live_order(signal, pos_size, exchange=exchange)
+            success = self._place_live_order(signal, pos_size)
             if success:
                 self.open_positions[trade_id] = position
                 self._save_position(position)
                 self.risk_manager.position_opened()
-                logger.info(f"[LIVE] Mövqe açıldı: {signal.symbol} {signal.direction} @ {entry:.4f}")
+                logger.info(f"[LIVE] Mövqe açıldı: {signal.symbol} {signal.direction}")
             else:
-                logger.error(f"[LIVE] Order uğursuz: {signal.symbol}")
+                logger.error(f"Real order uğursuz: {signal.symbol}")
                 return None
 
         return position
@@ -486,69 +484,10 @@ class OrderExecutor:
         logger.warning(f"Bütün mövqelər bağlandı: {len(closed)} mövqe")
         return closed
 
-    def _place_live_order(self, signal: TradeSignal, pos_size: PositionSize,
-                          exchange=None) -> bool:
-        """
-        Real exchange-ə market order göndər (Binance).
-        exchange: ccxt.binance obyekti (main.py-dan ötürülür)
-        """
-        if exchange is None:
-            logger.error("Live order üçün exchange client tələb olunur!")
-            return False
-
-        try:
-            symbol = signal.symbol           # "BTC/USDT"
-            side = "buy" if signal.direction == "LONG" else "sell"
-            amount = pos_size.units
-
-            # Market order — dərhal icra (slippage ~0.05-0.1%)
-            order = exchange.create_order(
-                symbol=symbol,
-                type="market",
-                side=side,
-                amount=amount,
-            )
-            logger.info(f"[LIVE] Order icra edildi: {symbol} {side} {amount} "
-                        f"| ID: {order.get('id')} | Status: {order.get('status')}")
-
-            # Exchange stop-loss orderı
-            sl_side = "sell" if signal.direction == "LONG" else "buy"
-            try:
-                sl_order = exchange.create_order(
-                    symbol=symbol,
-                    type="stop_market",
-                    side=sl_side,
-                    amount=amount,
-                    params={"stopPrice": round(signal.stop_loss, 8)},
-                )
-                logger.info(f"[LIVE] SL order: {sl_order.get('id')} @ {signal.stop_loss}")
-            except Exception as e:
-                logger.warning(f"SL order göndərilə bilmədi (software SL aktiv): {e}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"[LIVE] Order xətası: {e}")
-            return False
-
-    def close_live_position(self, pos: "OpenPosition", exit_price: float,
-                            exchange=None) -> bool:
-        """Real mövqeni bağla"""
-        if exchange is None:
-            return False
-        try:
-            side = "sell" if pos.direction == "LONG" else "buy"
-            exchange.create_order(
-                symbol=pos.symbol,
-                type="market",
-                side=side,
-                amount=pos.units,
-            )
-            logger.info(f"[LIVE] Mövqe bağlandı: {pos.symbol} {side} @ {exit_price}")
-            return True
-        except Exception as e:
-            logger.error(f"[LIVE] Bağlama xətası: {e}")
-            return False
+    def _place_live_order(self, signal: TradeSignal, pos_size: PositionSize) -> bool:
+        """Real exchange-ə order göndər — Faza 3-də aktiv edilir"""
+        logger.warning("Live order funksiyası hələ aktiv deyil — Faza 3-ü gözləyin")
+        return False
 
     @property
     def portfolio_value(self) -> float:

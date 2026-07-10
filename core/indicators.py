@@ -463,3 +463,296 @@ class TechnicalIndicators:
             support_level=sr_vals["support"],
             resistance_level=sr_vals["resistance"],
         )
+
+
+# ══════════════════════════════════════════════════════════
+# ƏLAVƏ İNDİKATORLAR — Order Flow & Market Microstructure
+# ══════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────
+# VWAP — Volume Weighted Average Price
+# ──────────────────────────────────────────────────────────
+def calculate_vwap(df: pd.DataFrame) -> float:
+    """Günlük VWAP hesabla."""
+    try:
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
+        return float(vwap.iloc[-1])
+    except Exception as e:
+        logger.warning(f"VWAP xətası: {e}")
+        return float(df["close"].iloc[-1])
+
+
+def get_vwap_signal(df: pd.DataFrame) -> dict:
+    """VWAP-a nisbətən siqnal — qiymət üstündə/altında?"""
+    vwap = calculate_vwap(df)
+    price = float(df["close"].iloc[-1])
+    diff_pct = ((price - vwap) / vwap) * 100
+
+    if diff_pct > 2:
+        signal, score_adj = "strong_bullish", 5
+    elif diff_pct > 0.5:
+        signal, score_adj = "bullish", 3
+    elif diff_pct < -2:
+        signal, score_adj = "strong_bearish", -5
+    elif diff_pct < -0.5:
+        signal, score_adj = "bearish", -3
+    else:
+        signal, score_adj = "neutral", 0
+
+    return {"vwap": round(vwap, 4), "price": round(price, 4),
+            "diff_pct": round(diff_pct, 2), "signal": signal, "score_adj": score_adj}
+
+
+# ──────────────────────────────────────────────────────────
+# OBV — On Balance Volume
+# ──────────────────────────────────────────────────────────
+def _calc_obv_series(df: pd.DataFrame) -> "pd.Series":
+    try:
+        import pandas_ta as ta
+        result = ta.obv(df["close"], df["volume"])
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    obv = [0.0]
+    for i in range(1, len(df)):
+        if df["close"].iloc[i] > df["close"].iloc[i - 1]:
+            obv.append(obv[-1] + df["volume"].iloc[i])
+        elif df["close"].iloc[i] < df["close"].iloc[i - 1]:
+            obv.append(obv[-1] - df["volume"].iloc[i])
+        else:
+            obv.append(obv[-1])
+    return pd.Series(obv, index=df.index)
+
+
+def get_obv_signal(df: pd.DataFrame, lookback: int = 20) -> dict:
+    """OBV trend analizi — divergence aşkarı daxil."""
+    try:
+        obv = _calc_obv_series(df)
+        n = min(lookback, len(obv) - 1)
+        obv_now, obv_prev = float(obv.iloc[-1]), float(obv.iloc[-n])
+        price_now = float(df["close"].iloc[-1])
+        price_prev = float(df["close"].iloc[-n])
+        obv_rising, price_rising = obv_now > obv_prev, price_now > price_prev
+
+        if obv_rising and price_rising:
+            signal, score_adj = "bullish_confirmation", 4
+        elif not obv_rising and not price_rising:
+            signal, score_adj = "bearish_confirmation", -4
+        elif obv_rising and not price_rising:
+            signal, score_adj = "bullish_divergence", 3
+        else:
+            signal, score_adj = "bearish_divergence", -3
+
+        obv_chg = ((obv_now - obv_prev) / abs(obv_prev) * 100) if obv_prev != 0 else 0
+        return {"obv_change_pct": round(obv_chg, 2), "signal": signal, "score_adj": score_adj}
+    except Exception as e:
+        logger.warning(f"OBV xətası: {e}")
+        return {"signal": "neutral", "score_adj": 0}
+
+
+# ──────────────────────────────────────────────────────────
+# Delta Volume — Alış / Satış Həcmi
+# ──────────────────────────────────────────────────────────
+def calculate_delta_volume(df: pd.DataFrame) -> dict:
+    """Son 20 mumda alış vs satış həcmi analizi."""
+    try:
+        recent = df.tail(20)
+        bull_mask = recent["close"] >= recent["open"]
+        buy_vol  = float(recent.loc[bull_mask,  "volume"].sum())
+        sell_vol = float(recent.loc[~bull_mask, "volume"].sum())
+        total    = buy_vol + sell_vol
+        if total == 0:
+            return {"delta": 0, "buy_ratio": 0.5, "signal": "neutral", "score_adj": 0}
+
+        buy_ratio = buy_vol / total
+        last3 = df.tail(3)
+        bull3 = last3["close"] >= last3["open"]
+        recent_delta_positive = float(last3.loc[bull3, "volume"].sum()) > float(last3.loc[~bull3, "volume"].sum())
+
+        if buy_ratio > 0.65 and recent_delta_positive:
+            signal, score_adj = "strong_buying", 6
+        elif buy_ratio > 0.55:
+            signal, score_adj = "buying", 3
+        elif buy_ratio < 0.35 and not recent_delta_positive:
+            signal, score_adj = "strong_selling", -6
+        elif buy_ratio < 0.45:
+            signal, score_adj = "selling", -3
+        else:
+            signal, score_adj = "neutral", 0
+
+        return {"buy_volume": round(buy_vol, 0), "sell_volume": round(sell_vol, 0),
+                "buy_ratio": round(buy_ratio, 3), "delta": round(buy_vol - sell_vol, 0),
+                "signal": signal, "score_adj": score_adj}
+    except Exception as e:
+        logger.warning(f"Delta volume xətası: {e}")
+        return {"signal": "neutral", "score_adj": 0}
+
+
+# ──────────────────────────────────────────────────────────
+# Volume Profile — POC, VAH, VAL
+# ──────────────────────────────────────────────────────────
+def calculate_volume_profile(df: pd.DataFrame, bins: int = 20) -> dict:
+    """POC (Point of Control), VAH, VAL hesabla."""
+    try:
+        high_max = df["high"].max()
+        low_min  = df["low"].min()
+        price    = float(df["close"].iloc[-1])
+
+        if high_max == low_min:
+            return {"poc": price, "vah": price, "val": price, "signal": "neutral", "score_adj": 0}
+
+        bin_edges = np.linspace(low_min, high_max, bins + 1)
+        vol_per_bin = np.zeros(bins)
+
+        for _, row in df.iterrows():
+            c_range = row["high"] - row["low"]
+            if c_range <= 0:
+                continue
+            for i in range(bins):
+                ol = max(bin_edges[i], row["low"])
+                oh = min(bin_edges[i + 1], row["high"])
+                if oh > ol:
+                    vol_per_bin[i] += row["volume"] * (oh - ol) / c_range
+
+        poc_idx = int(np.argmax(vol_per_bin))
+        poc = float((bin_edges[poc_idx] + bin_edges[poc_idx + 1]) / 2)
+
+        total_vol = vol_per_bin.sum()
+        sorted_bins = sorted(range(bins), key=lambda x: vol_per_bin[x], reverse=True)
+        included, acc = [], 0
+        for idx in sorted_bins:
+            acc += vol_per_bin[idx]
+            included.append(idx)
+            if acc >= total_vol * 0.70:
+                break
+
+        val = float(bin_edges[min(included)])
+        vah = float(bin_edges[max(included) + 1])
+
+        if price > vah:
+            signal, score_adj = "above_value_area", 4
+        elif price < val:
+            signal, score_adj = "below_value_area", -4
+        elif abs(price - poc) / poc < 0.005:
+            signal, score_adj = "at_poc", 1
+        else:
+            signal, score_adj = "in_value_area", 0
+
+        return {"poc": round(poc, 4), "vah": round(vah, 4), "val": round(val, 4),
+                "price": round(price, 4), "signal": signal, "score_adj": score_adj}
+    except Exception as e:
+        logger.warning(f"Volume Profile xətası: {e}")
+        return {"signal": "neutral", "score_adj": 0}
+
+
+# ──────────────────────────────────────────────────────────
+# Order Book Analizi (Point 10)
+# ──────────────────────────────────────────────────────────
+def analyze_order_book(order_book: dict) -> dict:
+    """
+    bid > ask × 3 → LONG üstünlüyü (Point 10 qaydası)
+    order_book = {"bids": [[price, size],...], "asks": [[price, size],...]}
+    """
+    try:
+        bids = order_book.get("bids", [])[:20]
+        asks = order_book.get("asks", [])[:20]
+        if not bids or not asks:
+            return {"signal": "neutral", "score_adj": 0, "bid_ask_ratio": 1.0}
+
+        total_bid = sum(b[0] * b[1] for b in bids)
+        total_ask = sum(a[0] * a[1] for a in asks)
+        if total_ask == 0:
+            return {"signal": "neutral", "score_adj": 0, "bid_ask_ratio": 1.0}
+
+        ratio = total_bid / total_ask
+        best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
+        spread_pct = ((best_ask - best_bid) / best_bid) * 100
+
+        if ratio >= 3.0:
+            signal, score_adj = "strong_long_advantage", 8
+        elif ratio >= 2.0:
+            signal, score_adj = "long_advantage", 5
+        elif ratio >= 1.5:
+            signal, score_adj = "slight_long_bias", 2
+        elif ratio <= 0.33:
+            signal, score_adj = "strong_short_advantage", -8
+        elif ratio <= 0.5:
+            signal, score_adj = "short_advantage", -5
+        elif ratio <= 0.67:
+            signal, score_adj = "slight_short_bias", -2
+        else:
+            signal, score_adj = "balanced", 0
+
+        return {"bid_volume_usd": round(total_bid, 0), "ask_volume_usd": round(total_ask, 0),
+                "bid_ask_ratio": round(ratio, 2), "spread_pct": round(spread_pct, 4),
+                "best_bid": best_bid, "best_ask": best_ask,
+                "signal": signal, "score_adj": score_adj}
+    except Exception as e:
+        logger.warning(f"Order book xətası: {e}")
+        return {"signal": "neutral", "score_adj": 0, "bid_ask_ratio": 1.0}
+
+
+# ──────────────────────────────────────────────────────────
+# Coin Reputasiya (Point 12)
+# ──────────────────────────────────────────────────────────
+COIN_REPUTATION: dict = {
+    "BTC/USDT": 95, "ETH/USDT": 90, "BNB/USDT": 85, "SOL/USDT": 88,
+    "XRP/USDT": 80, "ADA/USDT": 78, "DOGE/USDT": 68, "AVAX/USDT": 82,
+    "LINK/USDT": 83, "DOT/USDT": 78, "TRX/USDT": 72, "MATIC/USDT": 79,
+    "UNI/USDT": 80, "ATOM/USDT": 77, "LTC/USDT": 75, "INJ/USDT": 79,
+    "ARB/USDT": 77, "OP/USDT": 76, "SUI/USDT": 71, "APT/USDT": 73,
+    "FET/USDT": 69, "WLD/USDT": 65, "NEAR/USDT": 74, "FIL/USDT": 67,
+    "AAVE/USDT": 78,
+}
+
+def get_coin_reputation_adj(symbol: str) -> int:
+    """Coin reputasiyasına görə skor düzəlişi."""
+    rep = COIN_REPUTATION.get(symbol, 60)
+    if rep >= 90:   return 3
+    elif rep >= 80: return 1
+    elif rep >= 70: return 0
+    else:           return -3
+
+
+# ──────────────────────────────────────────────────────────
+# Birləşik Order Flow Skoru
+# ──────────────────────────────────────────────────────────
+def calculate_order_flow_score(df: pd.DataFrame, order_book: Optional[dict] = None) -> dict:
+    """
+    VWAP(30%) + OBV(20%) + Delta(30%) + VolProfile(20%) → 0-100 skor
+    Order book varsa əlavə tənzimləmə.
+    """
+    try:
+        vwap_d  = get_vwap_signal(df)
+        obv_d   = get_obv_signal(df)
+        delta_d = calculate_delta_volume(df)
+        vp_d    = calculate_volume_profile(df)
+
+        raw = (
+            vwap_d.get("score_adj", 0)  * 0.30 +
+            obv_d.get("score_adj", 0)   * 0.20 +
+            delta_d.get("score_adj", 0) * 0.30 +
+            vp_d.get("score_adj", 0)    * 0.20
+        )
+
+        ob_data = {}
+        if order_book:
+            ob_data = analyze_order_book(order_book)
+            ob_adj = ob_data.get("score_adj", 0)
+            if abs(ob_adj) >= 5:
+                raw += ob_adj * 0.15
+
+        normalized = max(0, min(100, 50 + (raw / 10) * 25))
+        direction = "bullish" if normalized > 55 else ("bearish" if normalized < 45 else "neutral")
+
+        return {
+            "order_flow_score": round(normalized, 1),
+            "vwap": vwap_d, "obv": obv_d,
+            "delta_volume": delta_d, "volume_profile": vp_d,
+            "order_book": ob_data, "direction": direction,
+        }
+    except Exception as e:
+        logger.error(f"Order Flow skor xətası: {e}")
+        return {"order_flow_score": 50, "direction": "neutral"}

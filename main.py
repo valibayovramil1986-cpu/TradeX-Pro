@@ -1,6 +1,7 @@
 """
-TradeX-Pro v2.0 — Əsas Giriş Nöqtəsi
-OpenAI GPT-4o + Self-Reflection + Memory + Telegram
+TradeX-Pro v3.0 — Multi-Agent Orkestrator
+18-nöqtəli plan: Technical(40%)+OrderFlow(15%)+Sentiment(15%)+OnChain(10%)+AI(20%)
+Market Regime | AI Memory | Dynamic Risk | 4 TF | Chief Trader Consensus
 """
 
 import asyncio
@@ -23,6 +24,8 @@ from core.market_scanner import MarketScanner
 from ai.gpt4_client import GPT4Client
 from ai.signal_contextualizer import SignalContextualizer
 from ai.reflection_engine import ReflectionEngine
+from ai.agents.macro_analyst import MacroAnalystAgent
+from ai.agents.chief_trader import ChiefTraderAgent
 from memory.trade_journal import TradeJournal
 from memory.weight_manager import WeightManager
 from memory.pattern_memory import PatternMemory
@@ -50,7 +53,7 @@ class TradeXPro:
 
     async def initialize(self):
         """Bütün komponentləri işə sal"""
-        logger.info("🤖 TradeX-Pro v2.0 başladılır...")
+        logger.info("🤖 TradeX-Pro v3.0 (Multi-Agent) başladılır...")
 
         # Konfiqurasiya yoxlaması
         errors = Settings.validate()
@@ -91,6 +94,13 @@ class TradeXPro:
             self.contextualizer = None
             self.reflection_engine = None
             logger.warning("OpenAI API açarı yoxdur — AI funksiyaları deaktivdir")
+
+        # ── Multi-Agent Sistemi (v3.0) ──
+        self.macro_agent  = MacroAnalystAgent(newsapi_key=Settings.NEWSAPI_KEY)
+        self.chief_agent  = ChiefTraderAgent(gpt_client=self.gpt_client)
+        # AI Memory (Point 11): simvol üzrə statistika
+        self._coin_stats: dict = {}   # {symbol: {trades, wins, losses, total_pnl}}
+        logger.info("Multi-Agent sistem işə salındı ✅ (MacroAnalyst + ChiefTrader)")
 
         # ── Signal & Scanner ──
         weights = self.weight_manager.get_signal_weights()
@@ -235,69 +245,152 @@ class TradeXPro:
     # Əsas Skan Prosesi
     # ──────────────────────────────────────────────
     async def _scheduled_scan(self):
-        """3 saatdan bir çağırılan əsas skan — faza məhdudiyyətsiz"""
+        """
+        Saatlıq əsas skan — Multi-Agent Orkestrasiya (v3.0)
+
+        Axın:
+        1. MarketScanner → 4 TF MTF + Regime aşkar
+        2. MacroAnalystAgent → Sentiment + News + Whale (1 dəfə bütün skan üçün)
+        3. Hər siqnal üçün ChiefTraderAgent → 3-agent consensus + confidence tier
+        4. Dinamik risk + mövqe açma
+        """
         if self._trading_paused:
             logger.info("Ticarət dayandırılıb — skan keçildi")
             return
 
         logger.info(f"⏰ Planlaşdırılmış skan: {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
 
-        # Texniki skan — faza parametri artıq istifadə edilmir
+        # ── 1. Texniki Skan (4 TF + MTF confluence + Regime) ─────
         signals = await self.scanner.run_scan()
 
-        # Siqnalları GPT-4 ilə zənginləşdir
-        # Yalnız hər timeframe cütündən ƏVVƏL texniki filtr tətbiq et
+        if not signals:
+            logger.info("Skan siqnal qaytarmadı")
+            return
+
+        # ── 2. Makro Analiz — 1 dəfə, bütün skan üçün ─────────────
+        # Point 7+8: News + Whale + Fear/Greed
+        # Əvvəlcə dominant istiqaməti müəyyən et (çoxluq)
+        long_count  = sum(1 for s in signals if s.direction == "LONG")
+        short_count = sum(1 for s in signals if s.direction == "SHORT")
+        dominant_direction = "LONG" if long_count >= short_count else "SHORT"
+
+        try:
+            macro_result = await self.macro_agent.analyze(direction=dominant_direction)
+        except Exception as e:
+            logger.error(f"Makro analiz xətası: {e}")
+            macro_result = {"macro_score": 50, "halt_trading": False,
+                           "summary": "Makro analiz əldə edilə bilmədi",
+                           "fear_greed": {"value": 50, "label": "Neutral"}}
+
+        macro_score = macro_result.get("macro_score", 50.0)
+        macro_halt  = macro_result.get("halt_trading", False)
+
+        if macro_halt:
+            halt_reason = macro_result.get("halt_reason", "Kritik hadisə")
+            logger.warning(f"⚠️ Makro HALT: {halt_reason}")
+            if self.telegram:
+                await self.telegram.send_risk_alert("MAKRO HALT", halt_reason)
+            return
+
+        # ── 3. GPT Kontekstualizasiya (AI Reasoning = 20%) ─────────
         raw_actionable = []
-        if self.contextualizer:
-            for signal in signals:
-                if signal.proceed and signal.technical_score >= 55:
-                    enriched = await self.contextualizer.enrich_signal(signal, self.signal_engine)
-                    raw_actionable.append(enriched)
-        else:
-            raw_actionable = [s for s in signals if s.proceed]
-
-        # Hər simvoldan yalnız ən yüksək ballı siqnal saxla (timeframe dublikatlarını sil)
-        # 4h və 1h EYNI istiqamətdədirsə — confluence olaraq bonus ver
-        best_per_symbol: dict = {}
-        confluence_bonus: dict = {}
-        for s in raw_actionable:
-            key = s.symbol
-            if key not in best_per_symbol:
-                best_per_symbol[key] = s
-                confluence_bonus[key] = {"directions": [s.direction], "timeframes": [s.timeframe]}
-            else:
-                # Eyni simvol — başqa timeframe
-                cb = confluence_bonus[key]
-                cb["directions"].append(s.direction)
-                cb["timeframes"].append(s.timeframe)
-                # 4h + 1h eyni istiqamətdədirsə: +5 bonus
-                if len(set(cb["directions"])) == 1 and len(cb["timeframes"]) > 1:
-                    if s.final_score > best_per_symbol[key].final_score:
-                        best_per_symbol[key] = s
-                    best_per_symbol[key].final_score = min(
-                        best_per_symbol[key].final_score + 5, 100
-                    )
-                    logger.info(f"✨ {key} MTF confluence: 4h+1h eyni istiqamət — +5 bonus")
-                elif s.final_score > best_per_symbol[key].final_score:
-                    best_per_symbol[key] = s
-
-        actionable = sorted(best_per_symbol.values(), key=lambda x: x.final_score, reverse=True)
-
-        # Ticarətləri icra et
-        opened_trades = []
-        # SHORT filtr: yalnız real Spot live-da blokla
-        # Paper rejimdə həm LONG həm SHORT simulyasiya edilir
-        is_spot_live = (Settings.TRADING_MODE == "live" and not Settings.BINANCE_FUTURES)
-
-        for signal in actionable:
+        for signal in signals:
             if not signal.proceed or signal.direction == "NO_TRADE":
                 continue
-
-            # Real Spot live-da SHORT mümkün deyil
-            if is_spot_live and signal.direction == "SHORT":
-                logger.debug(f"⏭ {signal.symbol} SHORT — Spot live rejimində dəstəklənmir")
+            if signal.technical_score < 50:
                 continue
 
+            signal.macro_score = macro_score
+
+            if self.contextualizer:
+                try:
+                    signal = await self.contextualizer.enrich_signal(signal, self.signal_engine)
+                except Exception as e:
+                    logger.debug(f"GPT enrichment xətası ({signal.symbol}): {e}")
+            raw_actionable.append(signal)
+
+        # ── 4. ChiefTrader — 3-Agent Consensus (Point 17) ──────────
+        is_spot_live = (Settings.TRADING_MODE == "live" and not Settings.BINANCE_FUTURES)
+        risk_status  = self.risk_manager.status
+        open_symbols = {p.symbol for p in self.executor.open_positions.values()}
+
+        # Risk state for ChiefAgent
+        risk_state = {
+            "consecutive_losses": risk_status.get("consecutive_losses", 0),
+            "today_pnl_pct":      risk_status.get("today_pnl", 0) / max(self.executor.initial_balance, 1),
+            "trading_halted":     risk_status.get("trading_halted", False),
+            "win_streak":         risk_status.get("win_streak", 0),
+            "base_risk_pct":      Settings.MAX_RISK_PER_TRADE,
+            "recent_wins_10":     risk_status.get("recent_wins_10", 5),
+        }
+
+        # Portfolio state for ChiefAgent (Point 13: korrelyasiya)
+        correlated_set = {"BTC/USDT", "ETH/USDT", "BNB/USDT"}
+        corr_count = len(correlated_set & open_symbols)
+        portfolio_state = {
+            "open_positions_count": len(open_symbols),
+            "max_positions":        Settings.MAX_OPEN_POSITIONS,
+            "correlated_count":     corr_count,
+            "available_capital_pct": 1 - (len(open_symbols) / max(Settings.MAX_OPEN_POSITIONS, 1)),
+        }
+
+        # Rejim vol multiplier
+        regime = self.scanner.current_regime
+        vol_mult = regime.vol_multiplier if regime else 1.0
+
+        actionable_decisions = []
+        for signal in raw_actionable:
+            if signal.symbol in open_symbols:
+                logger.debug(f"⏭ {signal.symbol} — artıq açıq mövqe var")
+                continue
+
+            # Spot live-da SHORT mümkün deyil
+            if is_spot_live and signal.direction == "SHORT":
+                continue
+
+            # AI Memory düzəlişi (Point 11): coin statistikası
+            coin_mem = self._coin_stats.get(signal.symbol, {})
+            coin_rep_adj = 0
+            if coin_mem.get("trades", 0) >= 5:
+                wr = coin_mem.get("wins", 0) / coin_mem["trades"]
+                if wr >= 0.7:   coin_rep_adj = 2
+                elif wr >= 0.6: coin_rep_adj = 1
+                elif wr <= 0.3: coin_rep_adj = -3
+
+            # ChiefTrader qərarı
+            decision = self.chief_agent.decide(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                tech_score=signal.technical_score,
+                order_flow_score=signal.order_flow_score,
+                macro_score=signal.macro_score,
+                mtf_confluence=signal.mtf_confluence,
+                risk_state=risk_state,
+                portfolio_state=portfolio_state,
+                regime_vol_multiplier=vol_mult,
+                coin_rep_adj=coin_rep_adj,
+                ai_adjustment=int(signal.gpt_adjustment),
+                macro_halt=False,
+            )
+
+            signal.confidence_score = decision.confidence_score
+            signal.position_tier    = decision.position_tier
+
+            logger.info(
+                f"🧠 ChiefAI [{signal.symbol}] {signal.direction}: "
+                f"{decision.final_action} | tier={decision.position_tier} | "
+                f"conf={decision.confidence_score:.1f} | {decision.reasoning[:80]}"
+            )
+
+            if decision.proceed:
+                actionable_decisions.append((signal, decision))
+
+        # Confidence-ə görə sırala
+        actionable_decisions.sort(key=lambda x: x[1].confidence_score, reverse=True)
+
+        # ── 5. Ticarətləri İcra Et ──────────────────────────────────
+        opened_trades = []
+        for signal, decision in actionable_decisions:
             risk_check = self.risk_manager.check_trade_allowed(
                 self.executor.balance, self.executor.initial_balance
             )
@@ -306,56 +399,77 @@ class TradeXPro:
                     await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
                 break
 
-            # Korrelyasiya filtri: BTC+ETH+BNB eyni anda max 2 açıq olsun
-            correlated = {"BTC/USDT", "ETH/USDT", "BNB/USDT"}
-            open_symbols = {p.symbol for p in self.executor.open_positions.values()}
-            if signal.symbol in correlated and len(correlated & open_symbols) >= 2:
+            # Korrelyasiya filtri (Point 13): BTC+ETH+BNB max 2 eyni anda
+            open_symbols_now = {p.symbol for p in self.executor.open_positions.values()}
+            if signal.symbol in correlated_set and len(correlated_set & open_symbols_now) >= 2:
                 logger.info(f"⏭ {signal.symbol} — Korrelyasiya limiti (BTC/ETH/BNB max 2)")
                 continue
 
-            # Ardıcıl itkiyə görə azaldılmış risk faizi istifadə et
-            adjusted_risk = self.risk_manager.get_adjusted_risk_pct()
+            # Dinamik risk (Point 5) + Position tier multiplier (Point 4)
+            base_risk = self.chief_agent.get_dynamic_risk_pct(
+                Settings.MAX_RISK_PER_TRADE, risk_state
+            )
+            tier_mult = self.chief_agent.get_position_size_multiplier(decision.position_tier)
+            final_risk = base_risk * tier_mult * vol_mult
+
             pos_size = self.risk_manager.calculate_position_size(
                 self.executor.balance, signal.entry_zone_high, signal.stop_loss,
-                risk_pct_override=adjusted_risk,
+                risk_pct_override=final_risk,
             )
 
             position = self.executor.open_position(
                 signal, pos_size,
-                confidence=signal.final_score / 10,
+                confidence=decision.confidence_score / 10,
                 phase="live",
                 exchange=self._exchange_client,
             )
 
             if position and self.telegram:
+                msg = (
+                    f"🤖 *ChiefAI Qərarı* | {decision.position_tier.upper()}\n"
+                    f"Conf={decision.confidence_score:.0f} | Risk={final_risk*100:.2f}%\n"
+                    f"{decision.reasoning[:120]}"
+                )
                 await self.telegram.send_trade_opened(vars(position), Settings.TRADING_MODE.upper())
                 opened_trades.append(position)
 
-        # SL/TP yoxla
+        # ── 6. SL/TP Yoxla + Post-Trade Refleksiya ─────────────────
         prices = self.scanner.get_current_prices()
         closed = self.executor.check_sl_tp(prices)
+
         for trade in closed:
-            # Ticarəti gündəliyə əlavə et
             self.trade_journal.save_trade(vars(trade))
             self.pattern_memory.record_trade(trade.indicators_triggered, trade.pnl_usd)
 
-            # Refleksiya
-            # Kısmi çıxışda trade_id "abc123_TP1_partial" formatında ola bilər —
-            # DB-dəki əsl ID-ni almaq üçün ilk hissəni al
+            # AI Memory yenilə (Point 11, 18)
+            sym = trade.symbol
+            if sym not in self._coin_stats:
+                self._coin_stats[sym] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0}
+            self._coin_stats[sym]["trades"] += 1
+            if trade.pnl_usd > 0:
+                self._coin_stats[sym]["wins"] += 1
+            else:
+                self._coin_stats[sym]["losses"] += 1
+            self._coin_stats[sym]["total_pnl"] += trade.pnl_usd
+
+            # Post-trade refleksiya (Point 15: AI Trade Journal)
             reflection_summary = ""
             if self.reflection_engine:
-                base_trade_id = trade.trade_id.split("_")[0]
-                reflection = await self.reflection_engine.reflect_on_trade(base_trade_id)
-                if reflection:
-                    reflection_summary = reflection.get("summary", "")
+                try:
+                    base_trade_id = trade.trade_id.split("_")[0]
+                    reflection = await self.reflection_engine.reflect_on_trade(base_trade_id)
+                    if reflection:
+                        reflection_summary = reflection.get("summary", "")
+                except Exception as e:
+                    logger.debug(f"Refleksiya xətası: {e}")
 
             if self.telegram:
                 await self.telegram.send_trade_closed(vars(trade), reflection_summary)
 
-        # Çəki analizini yoxla (hər 20 ticarətdən sonra)
+        # ── 7. Çəki Analizi (hər 20 ticarətdən sonra) ──────────────
         all_trades = self.trade_journal.get_weekly_stats(days=30)
-        if all_trades.get("total_trades", 0) % 20 == 0 and all_trades.get("total_trades", 0) > 0:
-            # Son 20 ticarətin əsl datası ilə analiz et
+        total_t = all_trades.get("total_trades", 0)
+        if total_t > 0 and total_t % 20 == 0:
             recent = self.trade_journal.get_recent_trades(limit=20)
             changes = self.weight_manager.analyze_and_adjust(recent)
             if changes:
@@ -363,8 +477,8 @@ class TradeXPro:
                 self.signal_engine.update_weights(new_weights)
                 logger.info(f"✅ İndikatör çəkiləri yeniləndi: {list(changes.keys())}")
 
-        # Hesabat göndər
-        report = await self._build_scan_report(signals, actionable, opened_trades)
+        # ── 8. Scan Hesabatı ────────────────────────────────────────
+        report = await self._build_scan_report(signals, actionable_decisions, opened_trades, macro_result)
         if self.telegram:
             await self.telegram.send_scan_report(report)
 
@@ -643,41 +757,69 @@ class TradeXPro:
             lines.append("• Hələ yoxdur")
         return "\n".join(lines)
 
-    async def _build_scan_report(self, all_signals, actionable, opened) -> str:
-        """3 saatlıq Telegram hesabatı"""
-        now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-        stats = self.trade_journal.get_weekly_stats(days=7)
-        mode = "PAPER" if Settings.TRADING_MODE == "paper" else "🔴 LIVE"
-        total_trades = stats.get("total_trades", 0)
+    async def _build_scan_report(self, all_signals, actionable_decisions,
+                                  opened, macro_result: dict = None) -> str:
+        """Saatlıq Telegram hesabatı (Multi-Agent v3.0)"""
+        now    = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        stats  = self.trade_journal.get_weekly_stats(days=7)
+        mode   = "PAPER 📄" if Settings.TRADING_MODE == "paper" else "🔴 LIVE"
+        regime = self.scanner.current_regime
+        regime_str = f"{regime.regime}({regime.description[:20]})" if regime else "unknown"
+
+        # Makro özet
+        macro_str = ""
+        if macro_result:
+            fg    = macro_result.get("fear_greed", {})
+            whale = macro_result.get("whale", {})
+            macro_str = (
+                f"\n📊 *Makro:* F&G={fg.get('value',50)}({fg.get('label','?')}) | "
+                f"Xəbər={macro_result.get('news', {}).get('score', 0):+d} | "
+                f"{whale.get('summary', '')[:50]}"
+            )
 
         lines = [
-            f"🤖 *TradeX-Pro* | v2.0 | {mode}",
-            f"⏰ {now} | Cəmi ticarət: {total_trades}",
+            f"🤖 *TradeX-Pro v3.0* | {mode}",
+            f"⏰ {now} | Rejim: {regime_str}",
+            macro_str,
             f"━━━━━━━━━━━━━━━━━━━━━━",
-            f"📡 Analiz: {len(all_signals)} | Siqnal: {len(actionable)} | Açılan: {len(opened)}",
-            f"",
+            f"📡 Analiz: {len(all_signals)} | Əməliyyat: {len(actionable_decisions)} | Açılan: {len(opened)}",
+            "",
         ]
 
-        if actionable:
-            lines.append("🚦 *Aktiv Siqnallar:*")
-            for s in sorted(actionable, key=lambda x: x.final_score, reverse=True)[:3]:
-                direction_emoji = "🟢" if s.direction == "LONG" else "🔴"
-                strength_emoji = "⚡" if s.signal_strength == "STRONG" else "📊"
+        if actionable_decisions:
+            lines.append("🚦 *ChiefAI Qərarları (Top 3):*")
+            top3 = sorted(actionable_decisions, key=lambda x: x[1].confidence_score, reverse=True)[:3]
+            for sig, dec in top3:
+                emoji = "🟢" if sig.direction == "LONG" else "🔴"
+                tier_badge = {"aggressive": "⚡", "normal": "✅", "small": "🔵",
+                              "watchlist": "👁"}.get(dec.position_tier, "")
                 lines += [
-                    f"{direction_emoji}{strength_emoji} *{s.signal_strength} {s.direction}* — {s.symbol}",
-                    f"• Texniki: {s.technical_score:.0f} | GPT: {s.gpt_adjustment:+.0f} | Final: {s.final_score:.0f}/100",
-                    f"• SL: {s.stop_loss:.4f} | TP1: {s.tp1:.4f} | TP2: {s.tp2:.4f}",
+                    f"{emoji}{tier_badge} *{sig.direction}* — {sig.symbol} | Tier: {dec.position_tier.upper()}",
+                    f"• Conf={dec.confidence_score:.0f} | Tech={sig.technical_score:.0f} | "
+                    f"OF={sig.order_flow_score:.0f} | {'✅MTF' if sig.mtf_confluence else 'MTF--'}",
+                    f"• SL={sig.stop_loss:.4f} | TP1={sig.tp1:.4f} | TP2={sig.tp2:.4f}",
+                    "",
                 ]
-                if s.gpt_context:
-                    lines.append(f"• _GPT: {s.gpt_context[:100]}_")
+
+        # AI Memory özet (Point 11)
+        if self._coin_stats:
+            top_coins = sorted(
+                [(sym, d) for sym, d in self._coin_stats.items() if d["trades"] >= 3],
+                key=lambda x: x[1]["wins"] / x[1]["trades"], reverse=True
+            )[:3]
+            if top_coins:
+                lines.append("🧠 *AI Yaddaş (ən yaxşı coinlər):*")
+                for sym, d in top_coins:
+                    wr = d["wins"] / d["trades"] * 100
+                    lines.append(f"• {sym.split('/')[0]}: {d['trades']}t, {wr:.0f}%WR, ${d['total_pnl']:+.1f}")
                 lines.append("")
 
         lines += [
             f"━━━━━━━━━━━━━━━━━━━━━━",
             f"💼 *Portfolio:*",
             f"• Balans: ${self.executor.balance:,.2f}",
-            f"• Bu həftə: {stats.get('win_rate_pct', 0):.0f}% win | ${stats.get('total_pnl_usd', 0):+.2f}",
-            f"• Risk: {'⏸ DAYANDIRILMIŞ' if self._trading_paused or self.risk_manager.status['trading_halted'] else '✅ Aktiv'}",
+            f"• Bu həftə: {stats.get('win_rate_pct', 0):.0f}% WR | ${stats.get('total_pnl_usd', 0):+.2f}",
+            f"• Risk: {'⏸ DAYANDIRILMIŞ' if self._trading_paused or self.risk_manager.status.get('trading_halted') else '✅ Aktiv'}",
         ]
 
         return "\n".join(lines)
@@ -692,12 +834,14 @@ class TradeXPro:
         # Başlama mesajı
         if self.telegram:
             startup_msg = (
-                f"🚀 *TradeX-Pro v2.0 işə salındı!*\n"
+                f"🚀 *TradeX-Pro v3.0 Multi-Agent!*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"• Mode: {Settings.TRADING_MODE.upper()}\n"
-                f"• Faza: {self.phase_manager.current_phase} — {self.phase_manager.current_targets['name']}\n"
                 f"• Kapital: ${Settings.INITIAL_CAPITAL:,.0f}\n"
                 f"• AI: {'✅ GPT-4o Aktiv' if self.gpt_client else '⚠️ Demo Rejimdə'}\n"
+                f"• Agentlər: MacroAnalyst ✅ | ChiefTrader ✅\n"
+                f"• Timeframe: 15m+1h+4h+1D (4 TF MTF)\n"
+                f"• Siqnal Formula: Tech(40%)+OF(15%)+Sent(15%)+OnChain(10%)+AI(20%)\n"
                 f"• İlk skan: növbəti planlaşdırılmış saatda\n\n"
                 f"Komandalar üçün /help yazın"
             )

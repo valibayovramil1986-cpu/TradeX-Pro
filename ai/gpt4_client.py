@@ -81,50 +81,43 @@ Always output valid JSON. Never hallucinate price levels or percentages.
         Texniki siqnalı makro kontekstlə birləşdir.
         Qaytarır: {adjustment: int, reasoning: str, proceed: bool}
         """
-        direction   = signal_data.get("direction", "LONG")
-        tech_score  = signal_data.get("technical_score", 60)
-        fg          = (macro_data or {}).get("fear_greed_index", {}) or {}
-        fg_value    = fg.get("value", 50)
-        fg_label    = fg.get("label", "Neutral")
-        macro_str   = json.dumps(macro_data or {}, indent=2)
-
+        macro_str = json.dumps(macro_data or {}, indent=2)
         prompt = f"""
-You are a professional crypto trading assistant. Evaluate this signal and give a SPECIFIC adjustment.
+Analyze this trading signal and provide context-aware adjustment:
 
-SIGNAL:
+TECHNICAL SIGNAL:
 {json.dumps(signal_data, indent=2)}
 
-MACRO: Fear/Greed = {fg_value} ({fg_label})
-NEWS: {news_context or "No significant news"}
+RECENT NEWS CONTEXT:
+{news_context or "No significant news available"}
 
-STRICT SCORING RULES — read carefully:
+MACRO ENVIRONMENT:
+{macro_str}
 
-A) Technical score already captures price action. Your job is ONLY macro/news overlay.
+ADJUSTMENT RULES (strictly follow):
+1. If signal direction is SHORT and fear_greed shows "Fear" or "Extreme Fear":
+   - Signal is ALIGNED with macro sentiment. Adjustment: 0 to -3 only. Set proceed=true.
+2. If signal direction is LONG and fear_greed shows "Fear" or "Extreme Fear":
+   - Apply caution. Adjustment: -5 to -10. Still set proceed=true unless news is severely negative.
+3. "Extreme Fear" alone is NOT enough to set proceed=false or give maximum penalty.
+   Crypto fear environments are normal and create valid SHORT opportunities.
+4. Set proceed=false ONLY for: confirmed black swan events, extreme negative breaking news,
+   or technical score < 55. Do NOT set proceed=false just because of macro sentiment.
+5. Maximum negative adjustment for any reason: -10. Reserve -10 for genuinely bad setups
+   (e.g., LONG during extreme fear WITH negative news simultaneously).
 
-B) LONG signal adjustments based on Fear/Greed:
-   - Greed/Extreme Greed (>60):    +2 to +5  (momentum confirmed)
-   - Neutral (40-60):               -1 to +1  (no macro edge)
-   - Fear (20-40):                  -2 to -4  (caution, but trend may still hold)
-   - Extreme Fear (<20):            -3 to -5  (max penalty for LONG in fear)
+Based on the broader context, provide:
+1. Score adjustment (-10 to +10 points, follow rules above)
+2. Whether to proceed with the trade (almost always true unless truly catastrophic)
+3. Brief reasoning (2-3 sentences max)
+4. Key risk factors if any
 
-   IMPORTANT: Do NOT give -7 or more for LONG. -5 is the absolute max for LONG.
-   A technical score of {tech_score} already reflects price weakness if any.
-
-C) SHORT signal adjustments:
-   - Fear/Extreme Fear:             0 to +3   (SHORT aligned with sentiment — BONUS)
-   - Neutral/Greed:                 -2 to -4  (counter-sentiment caution)
-
-D) proceed=false ONLY if: black swan event, exchange hack, regulatory shutdown, war.
-   "Extreme Fear" index alone NEVER justifies proceed=false.
-
-E) If no significant news and macro is neutral/mild fear: adjustment must be between -3 and +3.
-
-Output JSON only:
+Output JSON:
 {{
-  "adjustment": <integer, LONG max=-5, SHORT max=+3>,
-  "proceed": <boolean, almost always true>,
-  "reasoning": "<1-2 sentences, be specific about what factor drove your number>",
-  "risk_factors": ["<specific risk if any>"],
+  "adjustment": <integer -10 to 10>,
+  "proceed": <boolean>,
+  "reasoning": "<2-3 sentence context analysis>",
+  "risk_factors": ["<risk1>", "<risk2>"],
   "confidence_boost": <boolean>
 }}
 """
