@@ -23,30 +23,38 @@ class SignalContextualizer:
         logger.info("SignalContextualizer işə salındı ✅")
 
     async def enrich_signal(self, signal: TradeSignal,
-                            signal_engine: SignalEngine) -> TradeSignal:
+                            signal_engine: SignalEngine,
+                            cached_macro: dict = None) -> TradeSignal:
         """
         Texniki siqnalı GPT-4 ilə kontekstualizasiya et.
-        Yalnız ticarət açılacaq siqnallar üçün çağır (final_score >= 55).
+        cached_macro: MacroAnalystAgent-dən artıq gəlmiş makro data —
+                      ikiqat API çağırışının qarşısını alır.
         """
         if signal.direction == "NO_TRADE" or signal.technical_score < 55:
             return signal
 
-        # Xəbərləri çək
+        # Xəbərləri çək (simvola görə)
         news = await self._fetch_news(signal.symbol)
 
-        # Makro məlumatları çək
-        macro = await self._fetch_macro_data()
+        # Makro: keşdən istifadə et, yoxdursa özü çək
+        if cached_macro:
+            macro = cached_macro
+        else:
+            macro = await self._fetch_macro_data()
 
         # Siqnal məlumatını hazırla
         signal_data = {
-            "symbol": signal.symbol,
-            "direction": signal.direction,
-            "technical_score": signal.technical_score,
-            "trend": signal.trend,
-            "volatility": signal.volatility,
+            "symbol":              signal.symbol,
+            "direction":           signal.direction,
+            "technical_score":     signal.technical_score,
+            "order_flow_score":    signal.order_flow_score,
+            "macro_score":         signal.macro_score,
+            "mtf_confluence":      signal.mtf_confluence,
+            "trend":               signal.trend,
+            "volatility":          signal.volatility,
             "indicators_triggered": signal.indicators_triggered,
-            "timeframe": signal.timeframe,
-            "reasoning": signal.reasoning,
+            "timeframe":           signal.timeframe,
+            "reasoning":           signal.reasoning,
         }
 
         # GPT-4 çağır

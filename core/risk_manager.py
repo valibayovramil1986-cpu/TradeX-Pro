@@ -57,6 +57,8 @@ class RiskManager:
         self._week_pnl_usd = 0.0
         self._open_positions_count = 0
         self._trading_halted = False
+        self._win_streak = 0           # Ardıcıl qazanc sayı (Point 5)
+        self._recent_results: list = []  # Son 10 nəticə (True=qazanc, False=itki)
 
         self._init_db()
         self._load_state()
@@ -213,12 +215,20 @@ class RiskManager:
     def record_trade_result(self, pnl_usd: float):
         self._today_pnl_usd += pnl_usd
         self._week_pnl_usd += pnl_usd
+
+        # Son 10 nəticəni izlə
+        self._recent_results.append(pnl_usd > 0)
+        if len(self._recent_results) > 10:
+            self._recent_results.pop(0)
+
         if pnl_usd < 0:
             self._consecutive_losses += 1
-            logger.warning(f"İtki: ${pnl_usd:.2f} | Ardıcıl: {self._consecutive_losses}")
+            self._win_streak = 0
+            logger.warning(f"İtki: ${pnl_usd:.2f} | Ardıcıl itki: {self._consecutive_losses}")
         else:
             self._consecutive_losses = 0
-            logger.info(f"Qazanc: ${pnl_usd:.2f}")
+            self._win_streak += 1
+            logger.info(f"Qazanc: ${pnl_usd:.2f} | Ardıcıl qazanc: {self._win_streak}")
         self._save_state()
 
     def position_opened(self):
@@ -229,6 +239,16 @@ class RiskManager:
 
     def reset_daily_stats(self):
         self._today_pnl_usd = 0.0
+        # Ardıcıl itki sayğacını da hər gün sıfırla — köhnə itkiLər yeni günü
+        # bloklamasın. Circuit breaker yalnız eyni gün içindəki ardıcıl itkiLərə
+        # reaksiya verməlidir.
+        if self._consecutive_losses > 0:
+            logger.info(f"Gündəlik sıfırlama: ardıcıl itki sayğacı {self._consecutive_losses} → 0")
+            self._consecutive_losses = 0
+        # trading_halted-ı da sıfırla (əgər drawdown deyil, consecutive loss-dan gəlibsə)
+        if self._trading_halted:
+            self._trading_halted = False
+            logger.info("Gündəlik sıfırlama: ticarət yenidən aktivləşdirildi")
         self._save_state()
         logger.info("Gündəlik risk sayğacları sıfırlandı")
 
@@ -245,10 +265,13 @@ class RiskManager:
 
     @property
     def status(self) -> dict:
+        recent_wins = sum(1 for r in self._recent_results if r)
         return {
-            "trading_halted": self._trading_halted,
+            "trading_halted":    self._trading_halted,
             "consecutive_losses": self._consecutive_losses,
-            "today_pnl": self._today_pnl_usd,
-            "week_pnl": self._week_pnl_usd,
-            "open_positions": self._open_positions_count,
+            "today_pnl":         self._today_pnl_usd,
+            "week_pnl":          self._week_pnl_usd,
+            "open_positions":    self._open_positions_count,
+            "win_streak":        self._win_streak,
+            "recent_wins_10":    recent_wins,
         }

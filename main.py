@@ -98,9 +98,10 @@ class TradeXPro:
         # ── Multi-Agent Sistemi (v3.0) ──
         self.macro_agent  = MacroAnalystAgent(newsapi_key=Settings.NEWSAPI_KEY)
         self.chief_agent  = ChiefTraderAgent(gpt_client=self.gpt_client)
-        # AI Memory (Point 11): simvol üzrə statistika
-        self._coin_stats: dict = {}   # {symbol: {trades, wins, losses, total_pnl}}
-        logger.info("Multi-Agent sistem işə salındı ✅ (MacroAnalyst + ChiefTrader)")
+        # AI Memory (Point 11): simvol üzrə statistika — DB-dən yüklə
+        self._coin_stats: dict = self._load_coin_stats()
+        logger.info(f"Multi-Agent sistem işə salındı ✅ (MacroAnalyst + ChiefTrader) | "
+                    f"AI Memory: {len(self._coin_stats)} coin")
 
         # ── Signal & Scanner ──
         weights = self.weight_manager.get_signal_weights()
@@ -304,7 +305,10 @@ class TradeXPro:
 
             if self.contextualizer:
                 try:
-                    signal = await self.contextualizer.enrich_signal(signal, self.signal_engine)
+                    # cached_macro ötürülür — ikiqat API çağırışı olmur
+                    signal = await self.contextualizer.enrich_signal(
+                        signal, self.signal_engine, cached_macro=macro_result
+                    )
                 except Exception as e:
                     logger.debug(f"GPT enrichment xətası ({signal.symbol}): {e}")
             raw_actionable.append(signal)
@@ -441,7 +445,7 @@ class TradeXPro:
             self.trade_journal.save_trade(vars(trade))
             self.pattern_memory.record_trade(trade.indicators_triggered, trade.pnl_usd)
 
-            # AI Memory yenilə (Point 11, 18)
+            # AI Memory yenilə (Point 11, 18) — RAM + DB
             sym = trade.symbol
             if sym not in self._coin_stats:
                 self._coin_stats[sym] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0}
@@ -451,6 +455,8 @@ class TradeXPro:
             else:
                 self._coin_stats[sym]["losses"] += 1
             self._coin_stats[sym]["total_pnl"] += trade.pnl_usd
+            # DB-yə yaz (restart-a davamlı)
+            self._save_coin_stat(sym, self._coin_stats[sym])
 
             # Post-trade refleksiya (Point 15: AI Trade Journal)
             reflection_summary = ""
@@ -756,6 +762,54 @@ class TradeXPro:
         else:
             lines.append("• Hələ yoxdur")
         return "\n".join(lines)
+
+    # ──────────────────────────────────────────────
+    # AI Memory — DB persist (Point 11)
+    # ──────────────────────────────────────────────
+    def _load_coin_stats(self) -> dict:
+        """coin_memory cədvəlindən AI Memory yüklə."""
+        from database.db import engine
+        from sqlalchemy import text
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS coin_memory (
+                        symbol TEXT PRIMARY KEY,
+                        trades INTEGER DEFAULT 0,
+                        wins INTEGER DEFAULT 0,
+                        losses INTEGER DEFAULT 0,
+                        total_pnl REAL DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.commit()
+                rows = conn.execute(text("SELECT symbol, trades, wins, losses, total_pnl FROM coin_memory")).fetchall()
+            result = {}
+            for r in rows:
+                result[r[0]] = {"trades": r[1], "wins": r[2], "losses": r[3], "total_pnl": r[4]}
+            logger.info(f"AI Memory yükləndi: {len(result)} coin")
+            return result
+        except Exception as e:
+            logger.warning(f"AI Memory yükləmə xətası: {e}")
+            return {}
+
+    def _save_coin_stat(self, symbol: str, stat: dict):
+        """Bir coinin statistikasını DB-yə yaz."""
+        from database.db import engine
+        from sqlalchemy import text
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    INSERT INTO coin_memory (symbol, trades, wins, losses, total_pnl)
+                    VALUES (:sym, :t, :w, :l, :p)
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        trades=:t, wins=:w, losses=:l,
+                        total_pnl=:p, updated_at=CURRENT_TIMESTAMP
+                """), {"sym": symbol, "t": stat["trades"], "w": stat["wins"],
+                       "l": stat["losses"], "p": stat["total_pnl"]})
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"AI Memory saxlama xətası ({symbol}): {e}")
 
     async def _build_scan_report(self, all_signals, actionable_decisions,
                                   opened, macro_result: dict = None) -> str:
