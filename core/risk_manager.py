@@ -57,6 +57,7 @@ class RiskManager:
         self._week_pnl_usd = 0.0
         self._open_positions_count = 0
         self._trading_halted = False
+        self._halt_reason = ""         # Y2: halt mənşəyi — daily_dd | weekly_dd | consec_loss
         self._win_streak = 0           # Ardıcıl qazanc sayı (Point 5)
         self._recent_results: list = []  # Son 10 nəticə (True=qazanc, False=itki)
 
@@ -74,16 +75,22 @@ class RiskManager:
                     today_pnl_usd REAL DEFAULT 0,
                     week_pnl_usd REAL DEFAULT 0,
                     trading_halted INTEGER DEFAULT 0,
+                    halt_reason TEXT DEFAULT '',
                     updated_at {ts}
                 )
             """))
+            # Miqrasiya: mövcud DB-lərdə halt_reason olmaya bilər
+            try:
+                conn.execute(text("ALTER TABLE risk_state ADD COLUMN halt_reason TEXT DEFAULT ''"))
+            except Exception:
+                pass
             conn.commit()
 
     def _load_state(self):
         """DB-dən risk sayğaclarını yüklə"""
         with engine.connect() as conn:
             row = conn.execute(
-                text("SELECT consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted "
+                text("SELECT consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted, halt_reason "
                      "FROM risk_state WHERE id=1")
             ).fetchone()
         if row:
@@ -91,6 +98,7 @@ class RiskManager:
             self._today_pnl_usd = row[1] or 0.0
             self._week_pnl_usd = row[2] or 0.0
             self._trading_halted = bool(row[3])
+            self._halt_reason = row[4] or ""
             logger.info(f"Risk sayğacları DB-dən yükləndi — "
                         f"Ardıcıl itki: {self._consecutive_losses}, "
                         f"Bugün P&L: ${self._today_pnl_usd:.2f}, "
@@ -99,16 +107,16 @@ class RiskManager:
     def _save_state(self):
         """Risk sayğaclarını DB-yə yaz"""
         upsert = """
-            INSERT INTO risk_state (id, consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted)
-            VALUES (1, :cl, :td, :wk, :halt)
+            INSERT INTO risk_state (id, consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted, halt_reason)
+            VALUES (1, :cl, :td, :wk, :halt, :hr)
             ON CONFLICT (id) DO UPDATE SET
                 consecutive_losses=:cl, today_pnl_usd=:td,
-                week_pnl_usd=:wk, trading_halted=:halt,
+                week_pnl_usd=:wk, trading_halted=:halt, halt_reason=:hr,
                 updated_at=CURRENT_TIMESTAMP
         """ if _is_postgres() else """
             INSERT OR REPLACE INTO risk_state
-            (id, consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted)
-            VALUES (1, :cl, :td, :wk, :halt)
+            (id, consecutive_losses, today_pnl_usd, week_pnl_usd, trading_halted, halt_reason)
+            VALUES (1, :cl, :td, :wk, :halt, :hr)
         """
         with engine.connect() as conn:
             conn.execute(text(upsert), {
@@ -116,6 +124,7 @@ class RiskManager:
                 "td": self._today_pnl_usd,
                 "wk": self._week_pnl_usd,
                 "halt": 1 if self._trading_halted else 0,
+                "hr": self._halt_reason,
             })
             conn.commit()
 
@@ -184,6 +193,7 @@ class RiskManager:
         daily_dd = abs(self._today_pnl_usd) / initial_balance if self._today_pnl_usd < 0 else 0
         if daily_dd >= self.params.daily_drawdown_limit_pct:
             self._trading_halted = True
+            self._halt_reason = "daily_dd"
             self._save_state()
             return RiskCheck(False,
                              f"🚨 Gündəlik drawdown limiti keçildi! Ticarət DAYANDIRILIB.",
@@ -192,6 +202,7 @@ class RiskManager:
         weekly_dd = abs(self._week_pnl_usd) / initial_balance if self._week_pnl_usd < 0 else 0
         if weekly_dd >= self.params.weekly_drawdown_limit_pct:
             self._trading_halted = True
+            self._halt_reason = "weekly_dd"
             self._save_state()
             return RiskCheck(False,
                              f"🚨 Həftəlik drawdown limiti keçildi! Ticarət DAYANDIRILIB.",
@@ -199,6 +210,7 @@ class RiskManager:
 
         if self._consecutive_losses >= self.params.hard_stop_losses:
             self._trading_halted = True
+            self._halt_reason = "consec_loss"
             self._save_state()
             return RiskCheck(False,
                              f"🚨 {self.params.hard_stop_losses} ardıcıl itki! Ticarət DAYANDIRILIB.",
@@ -212,24 +224,41 @@ class RiskManager:
     # ──────────────────────────────────────────────
     # Nəticə Yenilənməsi
     # ──────────────────────────────────────────────
-    def record_trade_result(self, pnl_usd: float):
+    def record_pnl(self, pnl_usd: float):
+        """
+        Y1: Hər çıxışın (qismən və ya tam) P&L-ini gündəlik/həftəlik
+        sayğaclara dərhal əlavə et. Win/loss qərarı vermir.
+        """
         self._today_pnl_usd += pnl_usd
         self._week_pnl_usd += pnl_usd
+        self._save_state()
 
-        # Son 10 nəticəni izlə
-        self._recent_results.append(pnl_usd > 0)
+    def record_trade_outcome(self, win: bool, total_pnl_usd: float = 0.0):
+        """
+        Y1: Mövqe TAM bağlananda MƏCMU nəticə əsasında win/loss qeyd et.
+        Qismən çıxışların cəmi müsbətdirsə trade qazanc sayılır —
+        son kiçik hissənin mənfi olması yalançı 'itki' yaratmır.
+        """
+        self._recent_results.append(win)
         if len(self._recent_results) > 10:
             self._recent_results.pop(0)
 
-        if pnl_usd < 0:
+        if not win:
             self._consecutive_losses += 1
             self._win_streak = 0
-            logger.warning(f"İtki: ${pnl_usd:.2f} | Ardıcıl itki: {self._consecutive_losses}")
+            logger.warning(f"İtki (məcmu): ${total_pnl_usd:.2f} | "
+                           f"Ardıcıl itki: {self._consecutive_losses}")
         else:
             self._consecutive_losses = 0
             self._win_streak += 1
-            logger.info(f"Qazanc: ${pnl_usd:.2f} | Ardıcıl qazanc: {self._win_streak}")
+            logger.info(f"Qazanc (məcmu): ${total_pnl_usd:.2f} | "
+                        f"Ardıcıl qazanc: {self._win_streak}")
         self._save_state()
+
+    def record_trade_result(self, pnl_usd: float):
+        """Köhnə API ilə uyğunluq — P&L + nəticəni birlikdə qeyd edir."""
+        self.record_pnl(pnl_usd)
+        self.record_trade_outcome(pnl_usd > 0, pnl_usd)
 
     def position_opened(self):
         self._open_positions_count += 1
@@ -239,26 +268,35 @@ class RiskManager:
 
     def reset_daily_stats(self):
         self._today_pnl_usd = 0.0
-        # Ardıcıl itki sayğacını da hər gün sıfırla — köhnə itkiLər yeni günü
-        # bloklamasın. Circuit breaker yalnız eyni gün içindəki ardıcıl itkiLərə
-        # reaksiya verməlidir.
+        # Ardıcıl itki sayğacını hər gün sıfırla — köhnə itkilər yeni günü
+        # bloklamasın.
         if self._consecutive_losses > 0:
             logger.info(f"Gündəlik sıfırlama: ardıcıl itki sayğacı {self._consecutive_losses} → 0")
             self._consecutive_losses = 0
-        # trading_halted-ı da sıfırla (əgər drawdown deyil, consecutive loss-dan gəlibsə)
-        if self._trading_halted:
+        # Y2: yalnız GÜNDƏLİK mənşəli halt-ı aç.
+        # weekly_dd halt-ı həftəlik reset-ə qədər qüvvədə qalır!
+        if self._trading_halted and self._halt_reason in ("daily_dd", "consec_loss"):
             self._trading_halted = False
+            self._halt_reason = ""
             logger.info("Gündəlik sıfırlama: ticarət yenidən aktivləşdirildi")
+        elif self._trading_halted:
+            logger.warning(f"Halt qüvvədə qalır (səbəb: {self._halt_reason})")
         self._save_state()
         logger.info("Gündəlik risk sayğacları sıfırlandı")
 
     def reset_weekly_stats(self):
         self._week_pnl_usd = 0.0
+        # Y2: həftəlik drawdown halt-ı yalnız burada açılır
+        if self._trading_halted and self._halt_reason == "weekly_dd":
+            self._trading_halted = False
+            self._halt_reason = ""
+            logger.info("Həftəlik sıfırlama: weekly_dd halt-ı ləğv edildi")
         self._save_state()
         logger.info("Həftəlik risk sayğacları sıfırlandı")
 
     def resume_trading(self):
         self._trading_halted = False
+        self._halt_reason = ""
         self._consecutive_losses = 0
         self._save_state()
         logger.info("Ticarət yenidən başladıldı ✅")
@@ -268,6 +306,7 @@ class RiskManager:
         recent_wins = sum(1 for r in self._recent_results if r)
         return {
             "trading_halted":    self._trading_halted,
+            "halt_reason":       self._halt_reason,
             "consecutive_losses": self._consecutive_losses,
             "today_pnl":         self._today_pnl_usd,
             "week_pnl":          self._week_pnl_usd,

@@ -42,6 +42,7 @@ class TradexBot:
         self.chat_id = chat_id
         self.app: Optional[Application] = None
         self.bot: Optional[Bot] = None
+        self._close_all_pending_at: Optional[datetime] = None  # Y5: təsdiq pəncərəsi
 
         # Callback funksiyaları (main.py-dan gəlir)
         self._on_pause = on_pause
@@ -79,6 +80,7 @@ class TradexBot:
             CommandHandler("pause", self._cmd_pause),
             CommandHandler("resume", self._cmd_resume),
             CommandHandler("close_all", self._cmd_close_all),
+            CommandHandler("confirm_close", self._cmd_confirm_close),  # Y5
             CommandHandler("risk", self._cmd_risk),
             CommandHandler("promote", self._cmd_promote),
             CommandHandler("help", self._cmd_help),
@@ -211,9 +213,32 @@ class TradexBot:
     async def _cmd_close_all(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await self._auth_check(update):
             return
-        await update.message.reply_text("⚠️ *Bütün mövqelər bağlanır...* Əminsinizmi? "
-                                        "Davam etmək üçün /confirm\\_close yazın.",
+        self._close_all_pending_at = datetime.now(timezone.utc)
+        await update.message.reply_text("⚠️ *Bütün mövqelər bağlanacaq!* Əminsinizmi?\n"
+                                        "Təsdiq üçün 60 saniyə ərzində /confirm\\_close yazın.",
                                         parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_confirm_close(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Y5: /close_all təsdiqi — 60 saniyəlik pəncərə"""
+        if not await self._auth_check(update):
+            return
+        if self._close_all_pending_at is None:
+            await update.message.reply_text("Aktiv təsdiq sorğusu yoxdur. Əvvəlcə /close\\_all yazın.",
+                                            parse_mode=ParseMode.MARKDOWN)
+            return
+        elapsed = (datetime.now(timezone.utc) - self._close_all_pending_at).total_seconds()
+        self._close_all_pending_at = None
+        if elapsed > 60:
+            await update.message.reply_text("⏱ Təsdiq müddəti bitib (60s). Yenidən /close\\_all yazın.",
+                                            parse_mode=ParseMode.MARKDOWN)
+            return
+        if self._on_close_all:
+            await update.message.reply_text("🚨 Bütün mövqelər bağlanır...")
+            await self._on_close_all()
+            await update.message.reply_text("✅ *Bütün mövqelər bağlandı.*",
+                                            parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("Close funksiyası aktiv deyil.")
 
     async def _cmd_risk(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await self._auth_check(update):

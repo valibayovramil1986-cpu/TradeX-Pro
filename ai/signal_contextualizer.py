@@ -4,6 +4,7 @@ GPT-4 ilə siqnala makro kontekst əlavə edir
 """
 
 import os
+import asyncio
 from typing import Optional
 from loguru import logger
 
@@ -57,8 +58,10 @@ class SignalContextualizer:
             "reasoning":           signal.reasoning,
         }
 
-        # GPT-4 çağır
-        context_result = self.gpt.contextualize_signal(signal_data, news, macro)
+        # GPT-4 çağır (Y4: sync OpenAI çağırışı event loop-u bloklamasın)
+        context_result = await asyncio.to_thread(
+            self.gpt.contextualize_signal, signal_data, news, macro
+        )
 
         if "error" in context_result:
             logger.warning(f"Kontekstualizasiya xətası: {context_result['error']} — texniki bal saxlanılır")
@@ -99,7 +102,7 @@ class SignalContextualizer:
             url = (f"https://newsapi.org/v2/everything?q={keyword}"
                    f"&language=en&pageSize=5&sortBy=publishedAt"
                    f"&apiKey={self._news_api_key}")
-            resp = requests.get(url, timeout=5)
+            resp = await asyncio.to_thread(requests.get, url, timeout=5)  # Y4
             if resp.status_code == 200:
                 articles = resp.json().get("articles", [])
                 headlines = [a["title"] for a in articles[:5]]
@@ -122,7 +125,9 @@ class SignalContextualizer:
         """Bitcoin Fear & Greed indeksini çək"""
         try:
             import requests
-            resp = requests.get("https://api.alternative.me/fng/", timeout=5)
+            resp = await asyncio.to_thread(
+                requests.get, "https://api.alternative.me/fng/", timeout=5
+            )  # Y4
             if resp.status_code == 200:
                 data = resp.json()["data"][0]
                 return {

@@ -103,15 +103,30 @@ class TechnicalIndicators:
         empty = {"macd": None, "signal": None, "histogram": None}
         if macd_df is None or macd_df.empty or len(macd_df) < 2:
             return empty, empty
+
+        # DÜZƏLİŞ: pandas_ta sütun sırası MACD, MACDh(histogram), MACDs(signal)-dır.
+        # Əvvəlki kod mövqe ilə oxuyurdu və signal↔histogram yerdəyişik düşürdü.
+        cols = macd_df.columns.tolist()
+
+        def _find(prefix: str, fallback_idx: int) -> str:
+            for c in cols:
+                if c.startswith(prefix):
+                    return c
+            return cols[fallback_idx]
+
+        macd_col = _find("MACD_", 0)
+        sig_col  = _find("MACDs", 2)
+        hist_col = _find("MACDh", 1)
+
         current = {
-            "macd": float(macd_df.iloc[-1, 0]),
-            "signal": float(macd_df.iloc[-1, 1]),
-            "histogram": float(macd_df.iloc[-1, 2]),
+            "macd":      float(macd_df[macd_col].iloc[-1]),
+            "signal":    float(macd_df[sig_col].iloc[-1]),
+            "histogram": float(macd_df[hist_col].iloc[-1]),
         }
         prev = {
-            "macd": float(macd_df.iloc[-2, 0]),
-            "signal": float(macd_df.iloc[-2, 1]),
-            "histogram": float(macd_df.iloc[-2, 2]),
+            "macd":      float(macd_df[macd_col].iloc[-2]),
+            "signal":    float(macd_df[sig_col].iloc[-2]),
+            "histogram": float(macd_df[hist_col].iloc[-2]),
         }
         return current, prev
 

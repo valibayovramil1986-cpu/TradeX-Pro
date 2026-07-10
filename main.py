@@ -68,6 +68,9 @@ class TradeXPro:
         self.pattern_memory = PatternMemory()
         self.strategy_log = StrategyLog()
 
+        # ── Exchange client — əvvəlcə yaradılır ki, Executor-a ötürülsün (K1) ──
+        self._exchange_client = self._init_exchange()
+
         # ── Risk & Executor ──
         risk_params = RiskParams(
             max_risk_per_trade_pct=Settings.MAX_RISK_PER_TRADE,
@@ -80,11 +83,15 @@ class TradeXPro:
             risk_manager=self.risk_manager,
             mode=Settings.TRADING_MODE,
             initial_balance=Settings.INITIAL_CAPITAL,
+            exchange=self._exchange_client,   # K1: live bağlanışlar üçün
         )
 
         # ── AI Sistemi ──
         if Settings.OPENAI_API_KEY:
-            self.gpt_client = GPT4Client(Settings.OPENAI_API_KEY)
+            self.gpt_client = GPT4Client(
+                Settings.OPENAI_API_KEY,
+                daily_token_limit=Settings.OPENAI_DAILY_TOKEN_LIMIT,  # O4
+            )
             self.contextualizer = SignalContextualizer(self.gpt_client)
             self.reflection_engine = ReflectionEngine(
                 self.gpt_client, self.trade_journal, self.strategy_log
@@ -106,9 +113,6 @@ class TradeXPro:
         # ── Signal & Scanner ──
         weights = self.weight_manager.get_signal_weights()
         self.signal_engine = SignalEngine(weights=weights)
-
-        # Exchange client — həm OHLCV skan üçün, həm live order üçün saxlanılır
-        self._exchange_client = self._init_exchange()
 
         self.scanner = MarketScanner(
             signal_engine=self.signal_engine,
@@ -142,6 +146,9 @@ class TradeXPro:
                 get_patterns=self._get_patterns_message,
             )
             await self.telegram.initialize()
+            # Executor-un kritik xəbərdarlıqlarını Telegram-a bağla
+            # (live bağlanış uğursuzluğu, SL order xətası və s.)
+            self.executor.alert_callback = self.telegram.send_risk_alert
 
         # ── Zamanlayıcı ──
         self.scheduler = AsyncIOScheduler(timezone="UTC")
@@ -185,14 +192,13 @@ class TradeXPro:
             return None
 
     def _setup_scheduler(self):
-        """3 saatlıq skan zamanlayıcısı"""
-        # Hər 1 saatda bir skan (test rejimi: daha tez-tez, daha çox ticarət nümunəsi)
+        """Skan zamanlayıcısı — intervalı SCAN_INTERVAL_HOURS idarə edir (O7)"""
         self.scheduler.add_job(
             self._scheduled_scan,
             "interval",
-            hours=1,
+            hours=Settings.SCAN_INTERVAL_HOURS,
             id="market_scan",
-            name="Saatlıq Bazar Skanı",
+            name=f"{Settings.SCAN_INTERVAL_HOURS}-Saatlıq Bazar Skanı",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=120,
@@ -328,9 +334,13 @@ class TradeXPro:
             "recent_wins_10":     risk_status.get("recent_wins_10", 5),
         }
 
-        # Portfolio state for ChiefAgent (Point 13: korrelyasiya)
-        correlated_set = {"BTC/USDT", "ETH/USDT", "BNB/USDT"}
-        corr_count = len(correlated_set & open_symbols)
+        # Portfolio state for ChiefAgent (Point 13: korrelyasiya, O10: genişləndirilmiş qruplar)
+        correlation_groups = [
+            {"BTC/USDT", "ETH/USDT", "BNB/USDT"},                       # Majors
+            {"SOL/USDT", "AVAX/USDT", "NEAR/USDT", "APT/USDT", "SUI/USDT"},  # L1 altlar
+        ]
+        correlated_set = correlation_groups[0]  # ChiefAgent üçün əsas qrup
+        corr_count = max(len(g & open_symbols) for g in correlation_groups)
         portfolio_state = {
             "open_positions_count": len(open_symbols),
             "max_positions":        Settings.MAX_OPEN_POSITIONS,
@@ -403,10 +413,14 @@ class TradeXPro:
                     await self.telegram.send_risk_alert("Ticarət DAYANDIRILIB", risk_check.reason)
                 break
 
-            # Korrelyasiya filtri (Point 13): BTC+ETH+BNB max 2 eyni anda
+            # Korrelyasiya filtri (Point 13 + O10): hər qrupdan max 2 eyni anda
             open_symbols_now = {p.symbol for p in self.executor.open_positions.values()}
-            if signal.symbol in correlated_set and len(correlated_set & open_symbols_now) >= 2:
-                logger.info(f"⏭ {signal.symbol} — Korrelyasiya limiti (BTC/ETH/BNB max 2)")
+            corr_blocked = any(
+                signal.symbol in grp and len(grp & open_symbols_now) >= 2
+                for grp in correlation_groups
+            )
+            if corr_blocked:
+                logger.info(f"⏭ {signal.symbol} — Korrelyasiya limiti (qrupda max 2 mövqe)")
                 continue
 
             # Dinamik risk (Point 5) + Position tier multiplier (Point 4)
@@ -438,7 +452,7 @@ class TradeXPro:
                 opened_trades.append(position)
 
         # ── 6. SL/TP Yoxla + Post-Trade Refleksiya ─────────────────
-        prices = self.scanner.get_current_prices()
+        prices = await self.scanner.get_current_prices()
         closed = self.executor.check_sl_tp(prices)
 
         for trade in closed:
@@ -497,7 +511,7 @@ class TradeXPro:
             return
 
         try:
-            prices = self.scanner.get_current_prices()
+            prices = await self.scanner.get_current_prices()
             closed = self.executor.check_sl_tp(prices)
 
             for trade in closed:
@@ -615,7 +629,7 @@ class TradeXPro:
         logger.info("▶️ Ticarət davam etdirildi")
 
     async def _emergency_close_all(self):
-        prices = self.scanner.get_current_prices()
+        prices = await self.scanner.get_current_prices()
         closed = self.executor.close_all_positions(prices, "emergency_close_all")
         for trade in closed:
             self.trade_journal.save_trade(vars(trade))
@@ -643,13 +657,16 @@ class TradeXPro:
 
         result = self.phase_manager.promote_to_next_phase("user_command")
         if result["success"]:
-            # Kapitalı yenilə
+            # Kapitalı yenilə (Y6: Faza 3-də capital=None — real balans istifadə olunur)
             new_capital = result.get("capital")
             if new_capital:
                 self.executor.balance = new_capital
                 self.executor.initial_balance = new_capital
+                capital_str = f"Yeni kapital: ${new_capital:,.0f}"
+            else:
+                capital_str = "Kapital: real birja balansı"
             return (f"🎓 *{result['message']}*\n"
-                    f"Yeni kapital: ${new_capital:,.0f}\n"
+                    f"{capital_str}\n"
                     f"Mode: {result['mode'].upper()}")
         return result["message"]
 

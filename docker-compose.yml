@@ -14,7 +14,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"          # DataGrip qoşulması üçün
+      # YALNIZ localhost — internetə açıq deyil.
+      # DataGrip üçün SSH tunel: ssh -L 5432:localhost:5432 user@server
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tradex -d tradex_pro"]
       interval: 10s
@@ -70,7 +72,9 @@ services:
     environment:
       - DATABASE_URL=postgresql://tradex:${POSTGRES_PASSWORD}@postgres:5432/tradex_pro
     ports:
-      - "8501:8501"
+      # YALNIZ localhost — dashboard-da auth yoxdur, internetə açılmamalıdır.
+      # Baxmaq üçün SSH tunel: ssh -L 8501:localhost:8501 user@server
+      - "127.0.0.1:8501:8501"
     logging:
       driver: "json-file"
       options:

@@ -3,6 +3,7 @@ TradeX-Pro — Reflection Engine
 Micro + Macro özünü-analiz sistemi
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
@@ -48,7 +49,7 @@ class ReflectionEngine:
 
         logger.info(f"Micro refleksiya başlandı: {trade['symbol']} {trade['pnl_pct']}%")
 
-        reflection = self.gpt.micro_reflection(trade, similar)
+        reflection = await asyncio.to_thread(self.gpt.micro_reflection, trade, similar)  # Y4
 
         if "error" in reflection:
             logger.error(f"Refleksiya xətası: {reflection['error']}")
@@ -94,7 +95,9 @@ class ReflectionEngine:
         # Bu həftə edilən strategiya dəyişiklikləri
         strategy_changes = self.strategy_log.get_recent_changes(days=7)
 
-        reflection = self.gpt.macro_reflection(week_stats, recent_reflections, strategy_changes)
+        reflection = await asyncio.to_thread(
+            self.gpt.macro_reflection, week_stats, recent_reflections, strategy_changes
+        )  # Y4
 
         if "error" in reflection:
             logger.error(f"Macro refleksiya xətası: {reflection['error']}")
@@ -125,7 +128,9 @@ class ReflectionEngine:
         logger.info(f"🎓 Faza {phase} qiymətləndirməsi başlandı...")
 
         all_stats = self.journal.get_phase_stats(phase)
-        evaluation = self.gpt.phase_evaluation(phase, all_stats, phase_targets)
+        evaluation = await asyncio.to_thread(
+            self.gpt.phase_evaluation, phase, all_stats, phase_targets
+        )  # Y4
 
         if "error" not in evaluation:
             self.strategy_log.log_phase_evaluation(phase, evaluation)

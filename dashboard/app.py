@@ -55,11 +55,17 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 REFRESH_SEC  = 30   # 30 saniyədə bir yenilə
 
 # ── DB ───────────────────────────────────────────────────────
+@st.cache_resource
+def get_engine():
+    """Engine bir dəfə yaradılır — hər cache miss-də yenidən qurulmur."""
+    url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+    return create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0)
+
+
 @st.cache_data(ttl=25)
 def load_all():
     """Hər 25 saniyədə bir DB-dən təzə data çəkir."""
-    url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
-    eng = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0)
+    eng = get_engine()
 
     def q(sql):
         try:
@@ -78,7 +84,6 @@ def load_all():
                   if q("SELECT to_regclass('coin_memory')").iloc[0,0] is not None
                   else pd.DataFrame(),
     }
-    eng.dispose()
     return result
 
 # ── Məlumat yüklə ────────────────────────────────────────────

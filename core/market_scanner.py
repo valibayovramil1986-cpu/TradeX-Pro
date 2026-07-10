@@ -24,7 +24,7 @@ DEFAULT_SYMBOLS = {
         "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
         # Tier 2 — Yüksək həcm
         "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
-        "TRX/USDT", "MATIC/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT",
+        "TRX/USDT", "POL/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT",  # O6: MATIC→POL (rebrand)
         # Tier 3 — Orta həcm, yüksək uçuculuq
         "INJ/USDT", "ARB/USDT", "OP/USDT", "SUI/USDT", "APT/USDT",
         "FET/USDT", "WLD/USDT", "NEAR/USDT", "FIL/USDT", "AAVE/USDT",
@@ -306,15 +306,22 @@ class MarketScanner:
         })
         return df
 
-    def get_current_prices(self) -> dict[str, float]:
-        """Bütün aktivlərin cari qiymətlərini qaytar"""
-        prices = {}
-        for category, symbols in DEFAULT_SYMBOLS.items():
-            for symbol in symbols:
-                if self.exchange:
-                    try:
-                        ticker = self.exchange.fetch_ticker(symbol)
-                        prices[symbol] = ticker["last"]
-                    except Exception:
-                        pass
-        return prices
+    async def get_current_prices(self) -> dict[str, float]:
+        """
+        Bütün aktivlərin cari qiymətlərini qaytar.
+        Y4: fetch_tickers — 25 ayrı sorğu əvəzinə BİR sorğu;
+        executor-da işləyir ki, event loop bloklanmasın.
+        """
+        if not self.exchange:
+            return {}
+
+        all_symbols = [s for symbols in DEFAULT_SYMBOLS.values() for s in symbols]
+        try:
+            tickers = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.exchange.fetch_tickers(all_symbols)
+            )
+            return {sym: t["last"] for sym, t in tickers.items()
+                    if t.get("last") is not None}
+        except Exception as e:
+            logger.error(f"Toplu qiymət çəkilə bilmədi: {e}")
+            return {}

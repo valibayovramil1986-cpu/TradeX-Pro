@@ -25,6 +25,9 @@ class Settings:
     # ── Birjalar ───────────────────────────────
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_SECRET: str = os.getenv("BINANCE_SECRET", "")
+    BINANCE_FUTURES: bool = os.getenv("BINANCE_FUTURES", "false").lower() == "true"
+    # BINANCE_FUTURES=false → Spot (yalnız LONG)
+    # BINANCE_FUTURES=true  → USD-M Futures (LONG + SHORT, leverage)
     ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "")
     ALPACA_SECRET: str = os.getenv("ALPACA_SECRET", "")
 
@@ -46,9 +49,9 @@ class Settings:
     STRONG_SIGNAL_THRESHOLD: int = int(os.getenv("STRONG_SIGNAL_THRESHOLD", "75"))
 
     # ── Zamanlayıcı ────────────────────────────
-    SCAN_INTERVAL_HOURS: int = int(os.getenv("SCAN_INTERVAL_HOURS", "3"))
-    # UTC saatları: 0, 3, 6, 9, 12, 15, 18, 21
-    SCAN_HOURS_UTC: list = [0, 3, 6, 9, 12, 15, 18, 21]
+    # O7: bu parametr artıq scheduler-də real istifadə olunur.
+    # Default 1 saat — əvvəlki davranış qorunur; .env ilə dəyişin.
+    SCAN_INTERVAL_HOURS: int = int(os.getenv("SCAN_INTERVAL_HOURS", "1"))
 
     # ── Qeydiyyat ──────────────────────────────
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

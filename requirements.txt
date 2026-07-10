@@ -47,3 +47,6 @@ loguru>=0.7.0
 # ── Backtesting (opsional) ───────────────────────
 # vectorbt>=0.26.0
 # backtesting>=0.3.3
+
+# ── Test (dev) ──────────────────────────────────
+pytest>=8.0.0

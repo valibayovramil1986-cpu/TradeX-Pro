@@ -19,7 +19,8 @@ def get_database_url() -> str:
         # DigitalOcean bəzən postgres:// qaytarır, SQLAlchemy postgresql:// istəyir
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
-        logger.info("PostgreSQL istifadə edilir ✅")
+        db_type = "PostgreSQL" if url.startswith("postgresql") else url.split(":")[0]
+        logger.info(f"{db_type} istifadə edilir ✅ (DATABASE_URL)")
         return url
     else:
         from pathlib import Path

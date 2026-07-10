@@ -1,0 +1,38 @@
+# Təhlükəsizlik — açarlar image-ə düşməsin!
+.env
+*.env
+config/.env
+**/.env
+!config/.env.example
+
+# Git
+.git
+.github
+.gitignore
+
+# Virtual mühitlər və qalıqlar
+venv/
+.venv/
+TradeX-Pro/
+__pycache__/
+*.pyc
+
+# Loglar və data
+logs/
+*.log
+database/*.db
+database/*.db-journal
+backups/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Test
+tests/
+.pytest_cache/
+.coverage
+
+# Sənədlər
+*.md

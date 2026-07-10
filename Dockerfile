@@ -13,14 +13,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kod
+# Kod (.dockerignore .env, .git, venv və s. istisna edir)
 COPY . .
 
-# Logs qovluğu
-RUN mkdir -p logs database
+# Root olmayan istifadəçi
+RUN useradd --create-home --shell /usr/sbin/nologin tradex \
+    && mkdir -p logs database \
+    && chown -R tradex:tradex /app
+USER tradex
 
-# Sağlamlıq yoxlaması
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+# Sağlamlıq yoxlaması — real DB bağlantısını yoxlayır
+HEALTHCHECK --interval=60s --timeout=15s --start-period=90s --retries=3 \
+    CMD python -c "from database.db import test_connection; import sys; sys.exit(0 if test_connection() else 1)"
 
 CMD ["python", "main.py"]

@@ -19,7 +19,8 @@ systemctl start docker
 
 # ── 3. Firewall ──────────────────────────────────
 ufw allow OpenSSH
-ufw allow 5432/tcp   # DataGrip üçün PostgreSQL portu
+# QEYD: 5432 açılmır — PostgreSQL yalnız localhost-a bind olunub.
+# DataGrip üçün SSH tunel istifadə edin: ssh -L 5432:localhost:5432 user@server
 ufw --force enable
 
 # ── 4. Layihə klonlanması ────────────────────────
