@@ -48,8 +48,14 @@ class TradeXPro:
         logger.remove()
         logger.add(sys.stdout, level=Settings.LOG_LEVEL,
                    format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | {message}")
-        logger.add(Settings.LOG_FILE, rotation="10 MB", retention="30 days",
-                   level="DEBUG", encoding="utf-8")
+        # Log faylı yazıla bilməsə (icazə/disk problemi) bot ÇÖKMƏMƏLİDİR —
+        # stdout + docker logs onsuz da mövcuddur.
+        try:
+            logger.add(Settings.LOG_FILE, rotation="10 MB", retention="30 days",
+                       level="DEBUG", encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Log faylı açıla bilmədi ({Settings.LOG_FILE}): {e} — "
+                           f"yalnız stdout logging aktiv")
 
     async def initialize(self):
         """Bütün komponentləri işə sal"""
