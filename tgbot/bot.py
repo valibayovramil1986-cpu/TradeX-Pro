@@ -268,24 +268,32 @@ class TradexBot:
     # Bildiriş Göndərməsi
     # ──────────────────────────────────────────────
     async def send(self, message: str, parse_mode: str = ParseMode.MARKDOWN):
-        """Mərkəzləşdirilmiş mesaj göndərmə"""
+        """
+        Mərkəzləşdirilmiş mesaj göndərmə.
+        Markdown parse xətasında (dinamik mətndəki _ * [ və s. işarələr)
+        mesaj İTİRİLMİR — avtomatik düz mətn kimi yenidən göndərilir.
+        """
         if not self.bot:
             logger.error("Bot işə salınmayıb — mesaj göndərilmədi")
             return
-        try:
-            # 4096 simvol limitini keç
-            if len(message) > 4000:
-                chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
-                for chunk in chunks:
-                    await self.bot.send_message(
-                        chat_id=self.chat_id, text=chunk, parse_mode=parse_mode
-                    )
-            else:
+        # 4096 simvol limitini keç
+        chunks = ([message[i:i + 4000] for i in range(0, len(message), 4000)]
+                  if len(message) > 4000 else [message])
+        for chunk in chunks:
+            try:
                 await self.bot.send_message(
-                    chat_id=self.chat_id, text=message, parse_mode=parse_mode
+                    chat_id=self.chat_id, text=chunk, parse_mode=parse_mode
                 )
-        except Exception as e:
-            logger.error(f"Telegram mesaj xətası: {e}")
+            except Exception as e:
+                if "parse entities" in str(e).lower():
+                    # Markdown pozulub — formatsız göndər, məlumat itməsin
+                    try:
+                        await self.bot.send_message(chat_id=self.chat_id, text=chunk)
+                        logger.warning("Markdown parse xətası — mesaj düz mətn kimi göndərildi")
+                        continue
+                    except Exception as e2:
+                        e = e2
+                logger.error(f"Telegram mesaj xətası: {e}")
 
     async def send_scan_report(self, report: str):
         await self.send(report)
@@ -316,7 +324,7 @@ class TradexBot:
             f"• Nəticə: {'+' if pnl >= 0 else ''}{pnl:.2f}$ ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)\n"
             f"• Giriş: {trade_data.get('entry_price', 0):.4f} → {trade_data.get('exit_price', 0):.4f}\n"
             f"• Müddət: {trade_data.get('duration_minutes', 0):.0f} dəq\n"
-            f"• Çıxış: {trade_data.get('exit_reason', '?')}"
+            f"• Çıxış: {str(trade_data.get('exit_reason', '?')).replace('_', ' ')}"
         )
         if reflection_summary:
             msg += f"\n\n🧠 *AI:* _{reflection_summary}_"

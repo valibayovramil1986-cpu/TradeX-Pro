@@ -841,7 +841,9 @@ class TradeXPro:
         stats  = self.trade_journal.get_weekly_stats(days=7)
         mode   = "PAPER 📄" if Settings.TRADING_MODE == "paper" else "🔴 LIVE"
         regime = self.scanner.current_regime
-        regime_str = f"{regime.regime}({regime.description[:20]})" if regime else "unknown"
+        # QEYD: "_" Telegram Markdown-u pozur (bull_weak və s.) → "-" ilə əvəzlə
+        regime_str = (f"{regime.regime.replace('_', '-')}({regime.description[:20]})"
+                      if regime else "unknown")
 
         # Makro özet
         macro_str = ""
