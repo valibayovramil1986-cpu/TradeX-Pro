@@ -205,11 +205,14 @@ class ChiefTraderAgent:
       90+   → aggressive
     """
 
-    def __init__(self, gpt_client: Optional[GPT4Client] = None):
+    def __init__(self, gpt_client: Optional[GPT4Client] = None,
+                 min_confidence: float = 60.0):
         self.analyst_ai = AnalystAI()
         self.risk_ai    = RiskAI()
         self.macro_ai   = MacroAI()
         self.gpt        = gpt_client  # AI reasoning üçün (Point 1: 20% AI Reasoning)
+        # Mövqe açılması üçün minimum konfidans (.env: CONFIDENCE_THRESHOLD)
+        self.min_confidence = float(min_confidence)
         self._decisions_log: list = []
 
     def decide(
@@ -295,7 +298,7 @@ class ChiefTraderAgent:
         elif base_confidence >= 75:
             final_action = f"OPEN_{direction}"
             position_tier = "normal"
-        elif base_confidence >= 60:
+        elif base_confidence >= self.min_confidence:   # .env: CONFIDENCE_THRESHOLD
             final_action = f"OPEN_{direction}"
             position_tier = "small"
         elif base_confidence >= 40:

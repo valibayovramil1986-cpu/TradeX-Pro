@@ -47,6 +47,8 @@ class Settings:
     # ── Siqnal Parametrləri ────────────────────
     SIGNAL_THRESHOLD: int = int(os.getenv("SIGNAL_THRESHOLD", "60"))
     STRONG_SIGNAL_THRESHOLD: int = int(os.getenv("STRONG_SIGNAL_THRESHOLD", "75"))
+    # ChiefAI-ın mövqe açması üçün minimum konfidans (small tier qapısı)
+    CONFIDENCE_THRESHOLD: int = int(os.getenv("CONFIDENCE_THRESHOLD", "60"))
 
     # ── Zamanlayıcı ────────────────────────────
     # O7: bu parametr artıq scheduler-də real istifadə olunur.

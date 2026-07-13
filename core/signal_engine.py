@@ -80,10 +80,19 @@ class SignalEngine:
     STRONG_THRESHOLD = 75.0
     MODERATE_THRESHOLD = 60.0
 
-    def __init__(self, weights: Optional[SignalWeights] = None):
+    def __init__(self, weights: Optional[SignalWeights] = None,
+                 moderate_threshold: float = None,
+                 strong_threshold: float = None):
         self.indicators = TechnicalIndicators()
         self.weights = weights or SignalWeights()
-        logger.info("SignalEngine işə salındı ✅")
+        # Eşiklər .env-dən idarə oluna bilər (SIGNAL_THRESHOLD / STRONG_SIGNAL_THRESHOLD)
+        if moderate_threshold is not None:
+            self.MODERATE_THRESHOLD = float(moderate_threshold)
+        if strong_threshold is not None:
+            self.STRONG_THRESHOLD = float(strong_threshold)
+        logger.info(f"SignalEngine işə salındı ✅ "
+                    f"(eşiklər: moderate={self.MODERATE_THRESHOLD:.0f}, "
+                    f"strong={self.STRONG_THRESHOLD:.0f})")
 
     def update_weights(self, new_weights: SignalWeights):
         """WeightManager-dən gələn yeni çəkiləri tətbiq et"""

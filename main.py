@@ -110,7 +110,10 @@ class TradeXPro:
 
         # ── Multi-Agent Sistemi (v3.0) ──
         self.macro_agent  = MacroAnalystAgent(newsapi_key=Settings.NEWSAPI_KEY)
-        self.chief_agent  = ChiefTraderAgent(gpt_client=self.gpt_client)
+        self.chief_agent  = ChiefTraderAgent(
+            gpt_client=self.gpt_client,
+            min_confidence=Settings.CONFIDENCE_THRESHOLD,   # .env-dən idarə olunur
+        )
         # AI Memory (Point 11): simvol üzrə statistika — DB-dən yüklə
         self._coin_stats: dict = self._load_coin_stats()
         logger.info(f"Multi-Agent sistem işə salındı ✅ (MacroAnalyst + ChiefTrader) | "
@@ -118,7 +121,11 @@ class TradeXPro:
 
         # ── Signal & Scanner ──
         weights = self.weight_manager.get_signal_weights()
-        self.signal_engine = SignalEngine(weights=weights)
+        self.signal_engine = SignalEngine(
+            weights=weights,
+            moderate_threshold=Settings.SIGNAL_THRESHOLD,        # .env-dən idarə olunur
+            strong_threshold=Settings.STRONG_SIGNAL_THRESHOLD,
+        )
 
         self.scanner = MarketScanner(
             signal_engine=self.signal_engine,
