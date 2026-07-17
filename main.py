@@ -872,6 +872,25 @@ class TradeXPro:
             "",
         ]
 
+        # ── Diaqnostika: heç nə açılmayanda ən yaxın namizədləri göstər ──
+        # Siqnalların dəqiq harada ilişdiyini görmək üçün (eşik tənzimləməsi)
+        if not opened and all_signals:
+            candidates = sorted(
+                [s for s in all_signals if s.direction != "NO_TRADE"],
+                key=lambda s: s.technical_score, reverse=True
+            )[:3]
+            if candidates:
+                lines.append("🔎 *Ən yaxın namizədlər:*")
+                for s in candidates:
+                    conf_str = f"{s.confidence_score:.0f}" if s.confidence_score > 0 else "—"
+                    status = "✅keçdi" if s.proceed else "❌eşik altı"
+                    lines.append(
+                        f"• {s.symbol.split('/')[0]} {s.direction}: "
+                        f"Tech={s.technical_score:.0f} OF={s.order_flow_score:.0f} "
+                        f"Conf={conf_str} {status}"
+                    )
+                lines.append("")
+
         if actionable_decisions:
             lines.append("🚦 *ChiefAI Qərarları (Top 3):*")
             top3 = sorted(actionable_decisions, key=lambda x: x[1].confidence_score, reverse=True)[:3]
