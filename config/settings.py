@@ -49,6 +49,9 @@ class Settings:
     STRONG_SIGNAL_THRESHOLD: int = int(os.getenv("STRONG_SIGNAL_THRESHOLD", "75"))
     # ChiefAI-ın mövqe açması üçün minimum konfidans (small tier qapısı)
     CONFIDENCE_THRESHOLD: int = int(os.getenv("CONFIDENCE_THRESHOLD", "60"))
+    # Adaptiv eşik: F&G-yə görə avtomatik tənzimlənir (Fear=50/Neutral=55/Greed=60)
+    # false etsəniz CONFIDENCE_THRESHOLD statik istifadə olunur
+    ADAPTIVE_CONFIDENCE: bool = os.getenv("ADAPTIVE_CONFIDENCE", "true").lower() == "true"
 
     # ── Zamanlayıcı ────────────────────────────
     # O7: bu parametr artıq scheduler-də real istifadə olunur.

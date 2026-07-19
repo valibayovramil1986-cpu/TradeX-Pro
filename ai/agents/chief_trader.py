@@ -17,6 +17,26 @@ from loguru import logger
 from ai.gpt4_client import GPT4Client
 
 
+def adaptive_confidence_threshold(fg_value: int) -> float:
+    """
+    Fear/Greed indeksinə görə adaptiv minimum konfidans eşiyi.
+
+    Məntiq: makro skor konfidansa daxil olduğu üçün Fear bazarında
+    konfidanslar sistematik aşağı düşür — eşik də enməlidir ki,
+    keyfiyyətli texniki siqnallar bloklanmasın. Greed-də isə konfidanslar
+    şişir — eşik qalxmalıdır ki, zəif siqnallar keçməsin.
+
+      F&G < 40  (Fear)    → 50
+      F&G 40-55 (Neutral) → 55
+      F&G > 55  (Greed)   → 60
+    """
+    if fg_value < 40:
+        return 50.0
+    if fg_value <= 55:
+        return 55.0
+    return 60.0
+
+
 @dataclass
 class AgentVote:
     agent: str       # "analyst" | "risk" | "macro"

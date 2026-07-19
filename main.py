@@ -305,6 +305,16 @@ class TradeXPro:
         macro_score = macro_result.get("macro_score", 50.0)
         macro_halt  = macro_result.get("halt_trading", False)
 
+        # ── Adaptiv konfidans eşiyi (F&G-yə görə avtomatik) ────────
+        if Settings.ADAPTIVE_CONFIDENCE:
+            from ai.agents.chief_trader import adaptive_confidence_threshold
+            fg_val  = macro_result.get("fear_greed", {}).get("value", 50)
+            new_thr = adaptive_confidence_threshold(int(fg_val))
+            if new_thr != self.chief_agent.min_confidence:
+                logger.info(f"🎚 Adaptiv eşik: F&G={fg_val} → "
+                            f"CONFIDENCE {self.chief_agent.min_confidence:.0f}→{new_thr:.0f}")
+                self.chief_agent.min_confidence = new_thr
+
         if macro_halt:
             halt_reason = macro_result.get("halt_reason", "Kritik hadisə")
             logger.warning(f"⚠️ Makro HALT: {halt_reason}")
@@ -869,6 +879,8 @@ class TradeXPro:
             macro_str,
             f"━━━━━━━━━━━━━━━━━━━━━━",
             f"📡 Analiz: {len(all_signals)} | Əməliyyat: {len(actionable_decisions)} | Açılan: {len(opened)}",
+            f"🎚 Konfidans eşiyi: {self.chief_agent.min_confidence:.0f}"
+            + (" (adaptiv)" if Settings.ADAPTIVE_CONFIDENCE else " (statik)"),
             "",
         ]
 
