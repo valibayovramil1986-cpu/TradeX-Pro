@@ -92,7 +92,10 @@ class WeightManager:
                 ORDER BY id DESC LIMIT 1
             """)).fetchone()
         if row:
-            return json.loads(row[0])
+            from database.db import json_col
+            w = json_col(row[0])
+            if isinstance(w, dict):
+                return w
         return self.DEFAULT_WEIGHTS.copy()
 
     def get_signal_weights(self) -> SignalWeights:
@@ -220,7 +223,8 @@ class WeightManager:
                 SELECT weights_json, reason, trades_analyzed, created_at
                 FROM indicator_weights ORDER BY id DESC LIMIT :lim
             """), {"lim": limit}).fetchall()
-        return [{"weights": json.loads(r[0]), "reason": r[1],
+        from database.db import json_col
+        return [{"weights": json_col(r[0], {}), "reason": r[1],
                  "trades": r[2], "date": str(r[3])} for r in rows]
 
     @property

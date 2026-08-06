@@ -157,6 +157,7 @@ class StrategyLog:
                 ORDER BY id DESC LIMIT 1
             """), {"ph": phase}).fetchone()
         if row:
-            return {"evaluation": json.loads(row[0]),
+            from database.db import json_col
+            return {"evaluation": json_col(row[0], {}),
                     "readiness_score": row[1], "advance": bool(row[2])}
         return None

@@ -4,10 +4,29 @@ SQLite (lokal dev) və PostgreSQL (production) dəstəyi
 """
 
 import os
+import json
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 from loguru import logger
+
+
+def json_col(val, default=None):
+    """
+    JSON/JSONB sütununu təhlükəsiz oxu.
+    Postgres JSONB → psycopg2 artıq dict/list qaytarır;
+    SQLite isə string saxlayır. Hər iki halı düzgün emal edir.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, (bytes, bytearray)):
+        val = val.decode("utf-8")
+    try:
+        return json.loads(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def get_database_url() -> str:
